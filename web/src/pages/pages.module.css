@@ -1,0 +1,128 @@
+/* Shared page layout. The page container lives in the app shell; these only arrange regions inside it. */
+
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 16px;
+  align-items: stretch;
+}
+.grid3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  gap: 16px;
+  align-items: stretch;
+}
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 16px;
+  align-items: stretch;
+}
+.grid2 > *, .grid3 > *, .kpis > * { min-width: 0; }
+
+/* Overview: a wide column beside a narrow one. */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.stack { display: grid; gap: 16px; min-width: 0; align-content: start; }
+@media (max-width: 1100px) {
+  .split { grid-template-columns: minmax(0, 1fr); }
+}
+
+.gauges {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 16px;
+  justify-items: center;
+}
+
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.between { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; min-width: 0; }
+
+.strong { color: var(--foreground); font-weight: 500; }
+.muted { color: var(--text-secondary); }
+.small { font-size: var(--text-sm); }
+.num { font-variant-numeric: tabular-nums; }
+.danger { color: var(--danger); }
+
+.code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.template { display: block; min-width: 240px; white-space: normal; }
+
+.text { margin: 0; color: var(--foreground); line-height: 1.6; overflow-wrap: anywhere; }
+.textSecondary { margin: 0; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.6; overflow-wrap: anywhere; }
+
+.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
+.filters > * { min-width: 160px; }
+
+.scrollX { min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; }
+
+/* Lists of items separated by hairlines, inside one panel. */
+.list { display: grid; margin: 0; padding: 0; list-style: none; }
+.list > li { display: grid; gap: 6px; min-width: 0; padding: 14px 0; border-top: 1px solid var(--border-subtle); }
+.list > li:first-child { padding-top: 0; border-top: 0; }
+.list > li:last-child { padding-bottom: 0; }
+.itemTitle { margin: 0; color: var(--foreground); font-size: var(--text-base); font-weight: 500; overflow-wrap: anywhere; }
+
+.subheading {
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--text-base);
+  font-weight: 500;
+}
+
+/* Clickable list rows (reports, runs). */
+.pickList { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.pick {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-surface) - 10px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+@media (hover: hover) and (pointer: fine) {
+  .pick:hover { background: var(--surface-muted); }
+}
+.pick[aria-current="true"], .pick[aria-current="page"] { border-color: var(--border); background: var(--accent-subtle); }
+.pickTitle { min-width: 0; overflow: hidden; color: var(--foreground); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Master and detail side by side on wide screens. */
+.masterDetail {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 1000px) {
+  .masterDetail { grid-template-columns: minmax(0, 1fr); }
+}
+
+.statusCard {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: calc(var(--radius-surface) - 8px);
+  background: var(--surface-muted);
+}
+
+.exposedRow { color: var(--danger); font-weight: 500; }
+
+/* Status text inside secondary copy keeps its status color. */
+.textSecondary.danger { color: var(--danger); }

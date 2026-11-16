@@ -1,0 +1,20 @@
+.nameButton {
+  display: grid;
+  gap: 2px;
+  min-height: 44px;
+  align-content: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .nameButton:hover > :first-child { color: var(--accent); }
+}
+
+.badges { display: flex; flex-wrap: wrap; gap: 4px; min-width: 120px; }
+
+.spark { width: 168px; margin-left: auto; }
