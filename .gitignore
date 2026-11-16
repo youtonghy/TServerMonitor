@@ -1,0 +1,24 @@
+# Rust
+/target/
+backend/target/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local env and secrets
+.env
+.env.local
+.env.*.local
+
+# Arc Pro components are licensed: never commit their source, CI installs them at build time
+web/src/components/arc-pro/
+
+# Runtime data
+/data/
+*.db
+*.db-shm
+*.db-wal
+config.toml
+.DS_Store
