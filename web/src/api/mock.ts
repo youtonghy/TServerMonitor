@@ -1,0 +1,605 @@
+// Development mock (VITE_MOCK=1). Generates data that conforms to docs/api.md and simulates the SSE stream.
+// Never imported by production builds.
+import { ApiError, type Api } from "./client";
+import type {
+  AgentRun, AgentRunDetail, AgentStep, AiStatus, Alert, ContainerInfo, ContainerLogLine, DailyErrorCount, DbStatus,
+  Diagnosis, Finding, HostMetrics, LogCluster, LogRatesResponse, LogSource, MetricPoint, MetricsRange, ModeState,
+  PortInfo, Report, ReportKind, ReportSummary, Snapshot, StreamEventMap, StreamEventName,
+} from "./types";
+
+const GiB = 1024 ** 3;
+const MiB = 1024 ** 2;
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+const BOOT = Date.now();
+
+// Deterministic noise so history charts are stable across reloads.
+function hash(n: number): number {
+  let x = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b);
+  x ^= x >>> 13;
+  x = Math.imul(x, 0xc2b2ae35);
+  x ^= x >>> 16;
+  return (x >>> 0) / 4294967296;
+}
+const noise = (ts: number, salt: number) => hash(Math.floor(ts / 1000) * 31 + salt) - 0.5;
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const delay = <T,>(value: T, ms = 180 + Math.random() * 320): Promise<T> =>
+  new Promise(resolve => setTimeout(() => resolve(structuredClone(value)), ms));
+
+// Host
+
+const CORES = 8;
+const MEM_TOTAL = 16 * GiB;
+const SWAP_TOTAL = 4 * GiB;
+const DISK_TOTALS = [
+  { mount: "/", fs: "ext4", total: 100 * 1e9, base: 0.66 },
+  { mount: "/data", fs: "xfs", total: 500 * 1e9, base: 0.81 },
+  { mount: "/boot", fs: "ext4", total: 1 * 1e9, base: 0.34 },
+];
+
+function wave(ts: number) {
+  const hourOfDay = (ts / HOUR) % 24;
+  const daily = Math.sin(((hourOfDay - 8) / 24) * Math.PI * 2); // busier in the afternoon
+  const fast = Math.sin(ts / (7 * MIN));
+  return { daily, fast };
+}
+
+function pointAt(ts: number): MetricPoint {
+  const { daily, fast } = wave(ts);
+  const burst = ts > BOOT - 95 * MIN && ts < BOOT - 70 * MIN ? 28 : 0;
+  const cpu = clamp(32 + daily * 14 + fast * 6 + noise(ts, 1) * 12 + burst, 2, 99);
+  const mem = clamp(63 + daily * 5 + noise(ts, 2) * 3 + burst * 0.3, 10, 98);
+  const swap = clamp(18 + mem * 0.08 + noise(ts, 3) * 2, 0, 100);
+  const daysAgo = (BOOT - ts) / DAY;
+  const disk = clamp(74 - daysAgo * 0.12 + noise(ts, 4) * 0.2, 0, 100);
+  const load1 = clamp((cpu / 100) * CORES * 0.9 + noise(ts, 5) * 0.8, 0.05, 32);
+  return {
+    ts,
+    cpu_pct: round(cpu), mem_pct: round(mem), swap_pct: round(swap), disk_pct: round(disk), load1: round(load1, 2),
+    disk_read_bps: Math.round(clamp(6 * MiB + daily * 3 * MiB + noise(ts, 6) * 5 * MiB + burst * 0.4 * MiB, 0, 1e10)),
+    disk_write_bps: Math.round(clamp(3 * MiB + daily * 1.5 * MiB + noise(ts, 7) * 3 * MiB + burst * 0.8 * MiB, 0, 1e10)),
+    net_rx_bps: Math.round(clamp(12 * MiB + daily * 6 * MiB + noise(ts, 8) * 8 * MiB, 0, 1e10)),
+    net_tx_bps: Math.round(clamp(5 * MiB + daily * 3 * MiB + noise(ts, 9) * 4 * MiB, 0, 1e10)),
+  };
+}
+
+function round(v: number, digits = 1): number {
+  const f = 10 ** digits;
+  return Math.round(v * f) / f;
+}
+
+let live = pointAt(Date.now());
+
+function hostAt(ts: number): HostMetrics {
+  // Random walk around the deterministic curve for a lively realtime feed.
+  const target = pointAt(ts);
+  const spike = Math.random() < 0.03 ? 30 + Math.random() * 25 : 0;
+  const cpu = clamp(live.cpu_pct + (target.cpu_pct - live.cpu_pct) * 0.3 + (Math.random() - 0.5) * 8 + spike, 1, 99.5);
+  const mem = clamp(live.mem_pct + (target.mem_pct - live.mem_pct) * 0.2 + (Math.random() - 0.5) * 1.2, 5, 99);
+  live = { ...target, cpu_pct: round(cpu), mem_pct: round(mem) };
+  const load1 = round(clamp((cpu / 100) * CORES + (Math.random() - 0.5), 0.05, 32), 2);
+  return {
+    ts,
+    hostname: "web-prod-01",
+    os: "Ubuntu 24.04.1 LTS",
+    kernel: "6.8.0-48-generic",
+    uptime_secs: Math.floor((ts - (BOOT - 23 * DAY - 5 * HOUR)) / 1000),
+    cpu_pct: live.cpu_pct, cpu_cores: CORES,
+    load1, load5: round(load1 * 0.92 + 0.3, 2), load15: round(load1 * 0.85 + 0.4, 2),
+    mem_used: Math.round((mem / 100) * MEM_TOTAL), mem_total: MEM_TOTAL,
+    swap_used: Math.round((target.swap_pct / 100) * SWAP_TOTAL), swap_total: SWAP_TOTAL,
+    disk_read_bps: target.disk_read_bps, disk_write_bps: target.disk_write_bps,
+    net_rx_bps: Math.round(target.net_rx_bps * (0.8 + Math.random() * 0.4)),
+    net_tx_bps: Math.round(target.net_tx_bps * (0.8 + Math.random() * 0.4)),
+    disks: DISK_TOTALS.map((d, i) => ({ mount: d.mount, fs: d.fs, total: d.total, used: Math.round(d.total * (d.base + noise(ts, 20 + i) * 0.002)) })),
+    nets: [
+      { name: "eth0", rx_bps: target.net_rx_bps, tx_bps: target.net_tx_bps },
+      { name: "docker0", rx_bps: Math.round(target.net_rx_bps * 0.18), tx_bps: Math.round(target.net_tx_bps * 0.22) },
+    ],
+  };
+}
+
+const RANGE_SECS: Record<MetricsRange, number> = { "1h": 3600, "6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400 };
+
+function metricsFor(range: MetricsRange) {
+  const span = RANGE_SECS[range];
+  const step = Math.max(10, Math.round(span / 360 / 10) * 10);
+  const end = Math.floor(Date.now() / (step * 1000)) * step * 1000;
+  const points: MetricPoint[] = [];
+  for (let ts = end - span * 1000 + step * 1000; ts <= end; ts += step * 1000) points.push(pointAt(ts));
+  return { step_secs: step, points };
+}
+
+// Containers
+
+interface ContainerSeed {
+  id: string; name: string; image: string; state: string; status: string; health: string | null;
+  restart_count: number; restart_loop: boolean; oom_killed: boolean; cpu: number; mem: number; limit: number; started: number | null;
+}
+
+const containerSeeds: ContainerSeed[] = [
+  { id: "a1f3c9e2b7d4", name: "nginx", image: "nginx:1.27-alpine", state: "running", status: "Up 9 days", health: "healthy", restart_count: 0, restart_loop: false, oom_killed: false, cpu: 3.2, mem: 48 * MiB, limit: 512 * MiB, started: 9 * DAY },
+  { id: "b2e4d0f1a8c3", name: "php-fpm", image: "php:8.3-fpm", state: "running", status: "Up 9 days", health: "healthy", restart_count: 0, restart_loop: false, oom_killed: false, cpu: 38.5, mem: 1.8 * GiB, limit: 4 * GiB, started: 9 * DAY },
+  { id: "c3d5e1a2b9f4", name: "mysql", image: "mysql:8.4", state: "running", status: "Up 23 days (healthy)", health: "healthy", restart_count: 0, restart_loop: false, oom_killed: false, cpu: 21.7, mem: 5.2 * GiB, limit: 8 * GiB, started: 23 * DAY },
+  { id: "d4c6f2b3a0e5", name: "redis", image: "redis:7.4", state: "running", status: "Up 23 days", health: null, restart_count: 0, restart_loop: false, oom_killed: false, cpu: 1.4, mem: 310 * MiB, limit: 1 * GiB, started: 23 * DAY },
+  { id: "e5b7a3c4d1f6", name: "node-api", image: "registry.local/node-api:2.14.0", state: "running", status: "Up 2 hours (unhealthy)", health: "unhealthy", restart_count: 2, restart_loop: false, oom_killed: false, cpu: 12.9, mem: 720 * MiB, limit: 1 * GiB, started: 2 * HOUR },
+  { id: "f6a8b4d5e2c7", name: "queue-worker", image: "registry.local/worker:2.14.0", state: "restarting", status: "Restarting (1) 12 seconds ago", health: null, restart_count: 47, restart_loop: true, oom_killed: false, cpu: 0, mem: 0, limit: 1 * GiB, started: null },
+  { id: "a7c9d5e6f3b8", name: "report-builder", image: "registry.local/reports:1.3.2", state: "exited", status: "Exited (137) 41 minutes ago", health: null, restart_count: 3, restart_loop: false, oom_killed: true, cpu: 0, mem: 0, limit: 768 * MiB, started: null },
+  { id: "b8d0e6f7a4c9", name: "certbot", image: "certbot/certbot:v2.11", state: "exited", status: "Exited (0) 6 hours ago", health: null, restart_count: 0, restart_loop: false, oom_killed: false, cpu: 0, mem: 0, limit: 0, started: null },
+];
+
+function containersNow(): ContainerInfo[] {
+  const now = Date.now();
+  return containerSeeds.map((seed, index) => {
+    const running = seed.state === "running";
+    const history = Array.from({ length: 60 }, (_, i) => {
+      const ts = now - (59 - i) * 10_000;
+      const jitter = noise(ts, 100 + index);
+      return {
+        ts,
+        cpu_pct: running ? round(clamp(seed.cpu * (1 + jitter * 0.6) + Math.sin(i / 6 + index) * seed.cpu * 0.2, 0, 100 * CORES)) : seed.restart_loop && i % 7 < 2 ? round(8 + jitter * 6) : 0,
+        mem_used: running ? Math.round(seed.mem * (1 + jitter * 0.08)) : seed.oom_killed && i < 52 ? Math.round(seed.limit * (0.6 + i / 130)) : 0,
+      };
+    });
+    const last = history[history.length - 1];
+    return {
+      id: seed.id, name: seed.name, image: seed.image, state: seed.state, status: seed.status, health: seed.health,
+      restart_count: seed.restart_count, restart_loop: seed.restart_loop, oom_killed: seed.oom_killed,
+      cpu_pct: last.cpu_pct, mem_used: last.mem_used, mem_limit: seed.limit,
+      net_rx: running ? Math.round(seed.mem * 12 + index * 9e7) : 0, net_tx: running ? Math.round(seed.mem * 7 + index * 4e7) : 0,
+      started_at: seed.started === null ? null : now - seed.started,
+      history,
+    };
+  });
+}
+
+function containerLogs(id: string, tail: number): ContainerLogLine[] {
+  const seed = containerSeeds.find(c => c.id === id || c.name === id);
+  if (!seed) throw new ApiError(404, "container not found");
+  const now = Date.now();
+  const templates: Record<string, [ContainerLogLine["stream"], string][]> = {
+    "queue-worker": [
+      ["stdout", "[worker] booting queue consumer, concurrency=4"],
+      ["stdout", "[worker] connecting to redis://redis:6379/2"],
+      ["stderr", "Error: connect ECONNREFUSED amqp://mq:5672 user=svc_worker password=[REDACTED]"],
+      ["stderr", "    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1607:16)"],
+      ["stderr", "[worker] fatal: broker unavailable, exiting with code 1"],
+    ],
+    "report-builder": [
+      ["stdout", "[reports] loading 1,284,112 rows for monthly export"],
+      ["stdout", "[reports] heap used 612 MB / 768 MB"],
+      ["stderr", "<--- Last few GCs ---> Mark-Compact 742.1 (768.0) -> 741.8 (768.0) MB"],
+      ["stderr", "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory"],
+    ],
+    "node-api": [
+      ["stdout", "GET /api/orders 200 84ms"],
+      ["stdout", "GET /healthz 503 5002ms"],
+      ["stderr", "WARN upstream timeout talking to php-fpm after 5000ms (Authorization: Bearer [REDACTED])"],
+      ["stdout", "POST /api/cart 201 132ms"],
+    ],
+  };
+  const lines = templates[seed.name] ?? [
+    ["stdout", `${seed.name}: request handled in ${Math.round(5 + Math.random() * 40)}ms`],
+    ["stdout", `${seed.name}: ready to accept connections`],
+    ["stderr", `${seed.name}: slow operation detected, client=10.0.3.[REDACTED]`],
+  ];
+  const count = Math.min(tail, 60);
+  return Array.from({ length: count }, (_, i) => {
+    const [stream, text] = lines[i % lines.length];
+    return { ts: seed.name === "certbot" && i % 5 === 0 ? null : now - (count - i) * 4_000, stream, text };
+  });
+}
+
+// Logs
+
+const logSources: LogSource[] = [
+  { name: "nginx-access", kind: "nginx_access", path: "/var/log/nginx/access.log", container: null, lines_total: 18_402_331, errors_total: 41_207, rate_per_min: 1840, errors_per_min: 3.1 },
+  { name: "nginx-error", kind: "nginx_error", path: "/var/log/nginx/error.log", container: null, lines_total: 92_114, errors_total: 61_880, rate_per_min: 22, errors_per_min: 14.5 },
+  { name: "php-error", kind: "php_error", path: "/var/log/php8.3-fpm/error.log", container: null, lines_total: 412_903, errors_total: 288_410, rate_per_min: 386, errors_per_min: 312 },
+  { name: "php-slow", kind: "php_slow", path: "/var/log/php8.3-fpm/slow.log", container: null, lines_total: 20_541, errors_total: 0, rate_per_min: 6.4, errors_per_min: 0 },
+  { name: "mysql-slow", kind: "mysql_slow", path: "/var/lib/mysql/slow.log", container: null, lines_total: 31_877, errors_total: 0, rate_per_min: 4.2, errors_per_min: 0 },
+  { name: "node-api", kind: "node", path: null, container: "node-api", lines_total: 1_204_118, errors_total: 9_312, rate_per_min: 410, errors_per_min: 7.8 },
+  { name: "queue-worker", kind: "docker", path: null, container: "queue-worker", lines_total: 8_812, errors_total: 3_901, rate_per_min: 24, errors_per_min: 11.6 },
+];
+
+function logRates(): LogRatesResponse {
+  const step = 600;
+  const end = Math.floor(Date.now() / (step * 1000)) * step * 1000;
+  const base: Record<string, [number, number]> = {
+    "nginx-access": [16000, 20], "nginx-error": [150, 90], "php-error": [600, 380], "php-slow": [60, 0],
+    "mysql-slow": [40, 0], "node-api": [3800, 60], "queue-worker": [80, 30],
+  };
+  return {
+    step_secs: step,
+    series: logSources.map((source, index) => ({
+      source: source.name,
+      points: Array.from({ length: 144 }, (_, i) => {
+        const ts = end - (143 - i) * step * 1000;
+        const { daily } = wave(ts);
+        const [lines, errors] = base[source.name];
+        const burst = source.name === "php-error" && i > 126 ? 8 + (i - 126) * 0.6 : source.name === "queue-worker" && i > 132 ? 4 : 1;
+        const n = 1 + noise(ts, 200 + index) * 0.5;
+        return {
+          ts,
+          lines: Math.round(lines * (1 + daily * 0.45) * n * (burst > 1 ? burst * 0.7 : 1)),
+          errors: Math.round(errors * n * burst * (1 + daily * 0.2)),
+        };
+      }),
+    })),
+  };
+}
+
+const clusterSeeds: Omit<LogCluster, "first_seen" | "last_seen">[] = [
+  { fingerprint: "c01a", source: "php-error", level: "error", template: "PHP Fatal error: Uncaught PDOException: SQLSTATE[HY000] [2002] Connection refused in <path>:<n>", sample: "PHP Fatal error: Uncaught PDOException: SQLSTATE[HY000] [2002] Connection refused in /var/www/app/src/Db.php:88", count: 18_204 },
+  { fingerprint: "c02b", source: "php-error", level: "warning", template: "PHP Warning: Undefined array key \"<key>\" in <path> on line <n>", sample: "PHP Warning: Undefined array key \"coupon\" in /var/www/app/src/Cart.php on line 213", count: 9_877 },
+  { fingerprint: "c03c", source: "php-error", level: "error", template: "PHP Fatal error: Allowed memory size of <n> bytes exhausted (tried to allocate <n> bytes)", sample: "PHP Fatal error: Allowed memory size of 268435456 bytes exhausted (tried to allocate 20480 bytes)", count: 412 },
+  { fingerprint: "c04d", source: "nginx-error", level: "error", template: "upstream timed out (110: Connection timed out) while reading response header from upstream, client: <ip>", sample: "upstream timed out (110: Connection timed out) while reading response header from upstream, client: 203.0.113.[REDACTED]", count: 3_291 },
+  { fingerprint: "c05e", source: "nginx-error", level: "warning", template: "an upstream response is buffered to a temporary file <path>", sample: "an upstream response is buffered to a temporary file /var/cache/nginx/fastcgi_temp/3/02/0000001023", count: 1_802 },
+  { fingerprint: "c06f", source: "nginx-access", level: "error", template: "<ip> \"GET /wp-login.php HTTP/1.1\" 404", sample: "198.51.100.[REDACTED] \"GET /wp-login.php HTTP/1.1\" 404", count: 22_010 },
+  { fingerprint: "c070", source: "nginx-access", level: "info", template: "<ip> \"POST /api/checkout HTTP/2.0\" 502", sample: "203.0.113.[REDACTED] \"POST /api/checkout HTTP/2.0\" 502", count: 611 },
+  { fingerprint: "c081", source: "mysql-slow", level: "slow", template: "SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC (Query_time: <n>s)", sample: "SELECT * FROM orders WHERE user_id = 18842 ORDER BY created_at DESC (Query_time: 4.81s)", count: 2_944 },
+  { fingerprint: "c092", source: "mysql-slow", level: "slow", template: "UPDATE inventory SET stock = stock - ? WHERE sku IN (<list>) (Query_time: <n>s)", sample: "UPDATE inventory SET stock = stock - 1 WHERE sku IN ('A-1102','A-1103') (Query_time: 2.07s)", count: 803 },
+  { fingerprint: "c0a3", source: "php-slow", level: "slow", template: "script_filename = <path> [<addr>] curl_exec() <path>:<n>", sample: "script_filename = /var/www/app/public/index.php [0x7f3a] curl_exec() /var/www/app/src/Payment.php:142", count: 1_240 },
+  { fingerprint: "c0b4", source: "node-api", level: "error", template: "Error: upstream timeout talking to php-fpm after <n>ms", sample: "Error: upstream timeout talking to php-fpm after 5000ms", count: 4_118 },
+  { fingerprint: "c0c5", source: "node-api", level: "info", template: "GET /healthz <n> <n>ms", sample: "GET /healthz 503 5002ms", count: 712 },
+  { fingerprint: "c0d6", source: "queue-worker", level: "error", template: "Error: connect ECONNREFUSED <url>", sample: "Error: connect ECONNREFUSED amqp://mq:5672", count: 3_877 },
+  { fingerprint: "c0e7", source: "queue-worker", level: "warning", template: "[worker] fatal: broker unavailable, exiting with code <n>", sample: "[worker] fatal: broker unavailable, exiting with code 1", count: 1_904 },
+];
+
+function logClusters(filter: { source?: string; level?: string; limit?: number }): LogCluster[] {
+  const now = Date.now();
+  return clusterSeeds
+    .map((seed, i) => ({ ...seed, first_seen: now - (3 + i * 2) * DAY - i * HOUR, last_seen: now - Math.round(hash(i + 7) * (i < 4 ? 8 : 180)) * MIN - i * 1000 }))
+    .filter(c => !filter.source || c.source === filter.source)
+    .filter(c => !filter.level || c.level === filter.level)
+    .sort((a, b) => b.last_seen - a.last_seen)
+    .slice(0, filter.limit ?? 100);
+}
+
+function dailyErrors(days: number): DailyErrorCount[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Array.from({ length: days }, (_, i) => {
+    const date = new Date(today.getTime() - (days - 1 - i) * DAY);
+    const weekday = date.getDay();
+    const base = weekday === 0 || weekday === 6 ? 40 : 140;
+    const r = hash(i * 13 + 5);
+    const incident = r > 0.97 ? 1800 + r * 900 : r > 0.9 ? 600 : 0;
+    const recent = i > days - 3 ? 2400 : 0;
+    const quiet = r < 0.06 ? 0 : 1;
+    const y = date.getFullYear(), m = String(date.getMonth() + 1).padStart(2, "0"), d = String(date.getDate()).padStart(2, "0");
+    return { date: `${y}-${m}-${d}`, count: Math.round((base * (0.5 + r) + incident + recent) * quiet) };
+  });
+}
+
+// Security
+
+const findings: Finding[] = (() => {
+  const now = Date.now();
+  return [
+    { id: 41, category: "port", severity: "critical", title: "MySQL 3306 端口对公网开放", detail: "mysqld 监听 0.0.0.0:3306，防火墙未限制来源地址。", evidence: "ss -ltnp: LISTEN 0 151 0.0.0.0:3306 users:((\"mysqld\",pid=1182))", first_seen: now - 6 * DAY, last_seen: now - 2 * MIN, resolved: false },
+    { id: 38, category: "login", severity: "high", title: "SSH 暴力破解尝试", detail: "过去 24 小时有 3,412 次失败的 SSH 登录，来自 214 个不同地址。", evidence: "journalctl -u ssh: Failed password for invalid user admin from 45.148.10.[REDACTED] port 52144", first_seen: now - 3 * DAY, last_seen: now - 4 * MIN, resolved: false },
+    { id: 36, category: "config", severity: "high", title: "SSH 允许密码登录", detail: "sshd_config 中 PasswordAuthentication 为 yes，建议仅使用密钥登录。", evidence: "/etc/ssh/sshd_config:58 PasswordAuthentication yes", first_seen: now - 21 * DAY, last_seen: now - 10 * MIN, resolved: false },
+    { id: 33, category: "update", severity: "medium", title: "12 个安全更新待安装", detail: "包括 openssl、libc6 与 nginx，其中 2 个修复了高危漏洞。", evidence: "apt list --upgradable: openssl/noble-security 3.0.13-0ubuntu3.4", first_seen: now - 5 * DAY, last_seen: now - HOUR, resolved: false },
+    { id: 31, category: "container", severity: "medium", title: "容器以 root 身份运行", detail: "queue-worker 与 report-builder 未设置非特权用户。", evidence: "docker inspect queue-worker: \"User\": \"\"", first_seen: now - 9 * DAY, last_seen: now - 30 * MIN, resolved: false },
+    { id: 27, category: "kernel", severity: "low", title: "内核更新后需要重启", detail: "已安装 6.8.0-49，当前仍运行 6.8.0-48。", evidence: "/var/run/reboot-required", first_seen: now - 2 * DAY, last_seen: now - HOUR, resolved: false },
+    { id: 22, category: "network", severity: "low", title: "IPv6 未配置防火墙规则", detail: "ip6tables INPUT 链默认策略为 ACCEPT。", evidence: "ip6tables -S: -P INPUT ACCEPT", first_seen: now - 14 * DAY, last_seen: now - 2 * HOUR, resolved: false },
+    { id: 19, category: "db", severity: "info", title: "MySQL 慢查询日志已开启", detail: "long_query_time = 1，日志增长约 40 MB/天。", evidence: "SHOW VARIABLES LIKE 'long_query_time': 1.000000", first_seen: now - 20 * DAY, last_seen: now - 3 * HOUR, resolved: false },
+    { id: 12, category: "config", severity: "medium", title: "Nginx 暴露版本号", detail: "server_tokens 已关闭。", evidence: "nginx -T: server_tokens off;", first_seen: now - 30 * DAY, last_seen: now - 8 * DAY, resolved: true },
+  ];
+})();
+
+const ports: PortInfo[] = [
+  { proto: "tcp", addr: "0.0.0.0", port: 22, process: "sshd", exposed: true },
+  { proto: "tcp", addr: "0.0.0.0", port: 80, process: "nginx", exposed: true },
+  { proto: "tcp", addr: "0.0.0.0", port: 443, process: "nginx", exposed: true },
+  { proto: "tcp", addr: "0.0.0.0", port: 3306, process: "mysqld", exposed: true },
+  { proto: "tcp", addr: "127.0.0.1", port: 6379, process: "redis-server", exposed: false },
+  { proto: "tcp", addr: "127.0.0.1", port: 9000, process: "php-fpm", exposed: false },
+  { proto: "tcp", addr: "127.0.0.1", port: 8787, process: "tserver-monitor", exposed: false },
+  { proto: "tcp", addr: "172.18.0.5", port: 3000, process: "node", exposed: false },
+  { proto: "tcp", addr: "::", port: 22, process: "sshd", exposed: true },
+  { proto: "udp", addr: "127.0.0.53", port: 53, process: "systemd-resolved", exposed: false },
+  { proto: "udp", addr: "0.0.0.0", port: 123, process: null, exposed: true },
+];
+
+function dbStatus(): DbStatus[] {
+  const now = Date.now();
+  return [
+    {
+      name: "main", kind: "mysql", ok: true, error: null, ts: now - 20_000,
+      metrics: { connections: 87, max_connections: 151, threads_running: 9, qps: 412.6, slow_queries: 31_877, uptime_secs: 23 * 86400, innodb_buffer_pool_hit_pct: 97.4, replication_lag_secs: 0 },
+    },
+    {
+      name: "analytics", kind: "postgres", ok: false, error: "connection refused (127.0.0.1:5432)", ts: now - 20_000,
+      metrics: {},
+    },
+  ];
+}
+
+// Alerts
+
+const alerts: Alert[] = (() => {
+  const now = Date.now();
+  const make = (id: number, severity: Alert["severity"], source: string, title: string, summary: string, suggestion: string | null, ago: number, count: number, status: Alert["status"] = "open"): Alert =>
+    ({ id, severity, source, title, summary, suggestion, fingerprint: `fp-${id}`, created_at: now - ago, last_seen: now - Math.min(ago, 3 * MIN), count, status, notified: severity !== "info" });
+  return [
+    make(119, "critical", "logs", "php-error 错误率激增", "5 分钟内 PHP 错误从 40/分钟 升至 312/分钟，主要为 PDO 连接被拒绝。", "检查 MySQL 连接数上限与 php-fpm 连接池配置。", 18 * MIN, 64),
+    make(118, "critical", "containers", "queue-worker 重启循环", "容器在 30 分钟内重启 47 次，退出码 1。", "检查消息队列 mq:5672 是否可达。", 32 * MIN, 47),
+    make(117, "warning", "containers", "report-builder 内存溢出被终止", "容器因 OOM 退出 (137)，内存上限 768 MB。", "提高内存上限或分批导出。", 41 * MIN, 1),
+    make(116, "warning", "containers", "node-api 健康检查失败", "/healthz 连续 6 次返回 503。", null, 2 * HOUR, 6),
+    make(114, "warning", "security", "SSH 暴力破解尝试", "24 小时内 3,412 次失败登录。", "启用 fail2ban 并关闭密码登录。", 3 * DAY, 3412),
+    make(112, "info", "host", "磁盘 /data 使用率超过 80%", "当前 81%，预计 41 天后写满。", "清理旧日志或扩容。", 5 * DAY, 1),
+    make(108, "warning", "host", "CPU 持续高负载", "15 分钟平均负载 7.8 超过核心数的 90%。", null, 2 * DAY, 3, "resolved"),
+    make(104, "info", "db", "MySQL 慢查询增多", "慢查询较昨日上升 35%。", "为 orders.user_id 添加索引。", 6 * DAY, 12, "resolved"),
+  ];
+})();
+
+// Reports and agent
+
+const dims = (cpu: number, memory: number, disk: number, logs: number, security: number, containers: number, database: number) =>
+  ({ cpu, memory, disk, logs, security, containers, database });
+
+const diagnoses: Record<number, Diagnosis> = {
+  57: {
+    health_score: 64,
+    summary: "PHP 应用在过去 20 分钟出现大量数据库连接被拒绝错误，直接原因是 MySQL 连接数接近上限且 queue-worker 重启循环占用连接。建议立即调高连接池上限并修复消息队列连接。",
+    dimensions: dims(70, 66, 72, 31, 52, 48, 58),
+    root_causes: [
+      { title: "MySQL 连接数接近上限", evidence: "connections=148/151，PDOException 2002 在 18:05 后出现 18,204 次", confidence: "high" },
+      { title: "queue-worker 重启循环反复建连", evidence: "47 次重启，每次启动建立 20 个数据库连接后未释放", confidence: "medium" },
+      { title: "慢查询拖长连接占用时间", evidence: "orders 表按 user_id 查询平均 4.8 秒", confidence: "low" },
+    ],
+    security_risks: [
+      { title: "数据库端口暴露在公网", severity: "critical", detail: "3306 监听所有地址，可被扫描与暴力破解。", recommendation: "将 bind-address 改为 127.0.0.1，或在防火墙中仅允许内网访问。" },
+      { title: "SSH 暴力破解", severity: "high", detail: "大量失败登录来自不同地址。", recommendation: "关闭密码登录，启用 fail2ban。" },
+    ],
+    recommendations: [
+      { title: "调高 MySQL max_connections 并限制 php-fpm 连接池", category: "database", priority: "high", detail: "将 max_connections 调至 300，pm.max_children 降至 40。", expected_impact: "消除连接被拒绝错误，错误率预计下降 95%" },
+      { title: "修复 queue-worker 的消息队列地址", category: "config", priority: "high", detail: "环境变量 AMQP_URL 指向已下线的 mq 主机。", expected_impact: "停止重启循环，释放约 20 个数据库连接" },
+      { title: "为 orders.user_id 添加索引", category: "database", priority: "medium", detail: "ALTER TABLE orders ADD INDEX idx_user_created (user_id, created_at)。", expected_impact: "慢查询减少约 70%" },
+      { title: "限制 3306 端口仅内网访问", category: "security", priority: "high", detail: "ufw deny 3306，并修改 bind-address。", expected_impact: "关闭公网攻击面" },
+      { title: "为 report-builder 分批导出", category: "code", priority: "low", detail: "按 10 万行分页读取，避免一次加载全部数据。", expected_impact: "避免 OOM" },
+    ],
+    anomalies: [
+      { title: "PHP 错误率 8 倍突增", detail: "18:05 起 php-error 每分钟错误数从 40 升至 312。", severity: "critical" },
+      { title: "CPU 短时尖峰", detail: "18:10 CPU 达到 91%，持续约 4 分钟。", severity: "warning" },
+      { title: "网络出流量下降", detail: "与错误率上升同步，出流量下降 30%，疑似请求失败。", severity: "info" },
+    ],
+  },
+  56: {
+    health_score: 81,
+    summary: "过去一小时主机整体平稳，CPU 与内存处于常规区间。node-api 健康检查间歇失败，需关注。",
+    dimensions: dims(84, 78, 74, 76, 60, 70, 88),
+    root_causes: [{ title: "node-api 上游超时", evidence: "/healthz 503，php-fpm 响应超过 5 秒", confidence: "medium" }],
+    security_risks: [],
+    recommendations: [
+      { title: "为 node-api 健康检查设置独立超时", category: "config", priority: "medium", detail: "健康检查不应依赖 php-fpm。", expected_impact: "减少误报重启" },
+    ],
+    anomalies: [{ title: "node-api 健康检查失败", detail: "连续 6 次 503。", severity: "warning" }],
+  },
+  55: {
+    health_score: 77,
+    summary: "昨日主机运行稳定，平均 CPU 31%，内存 64%。/data 磁盘增长较快，预计 41 天写满；安全方面存在公网暴露的数据库端口与 SSH 暴力破解。",
+    dimensions: dims(82, 75, 61, 72, 49, 80, 85),
+    root_causes: [
+      { title: "日志未轮转导致 /data 增长", evidence: "/data/logs 日增 2.4 GB，logrotate 未覆盖该目录", confidence: "high" },
+    ],
+    security_risks: [
+      { title: "数据库端口暴露在公网", severity: "critical", detail: "3306 对 0.0.0.0 开放。", recommendation: "仅允许内网访问。" },
+      { title: "12 个安全更新待安装", severity: "medium", detail: "包括 openssl 与 libc6。", recommendation: "在维护窗口执行 apt upgrade 并重启。" },
+      { title: "IPv6 未设置防火墙", severity: "low", detail: "INPUT 默认 ACCEPT。", recommendation: "补充 ip6tables 规则。" },
+    ],
+    recommendations: [
+      { title: "为 /data/logs 配置 logrotate", category: "infra", priority: "high", detail: "按天轮转并保留 14 天，启用压缩。", expected_impact: "磁盘增长放缓约 80%" },
+      { title: "安装安全更新", category: "security", priority: "medium", detail: "apt upgrade 后重启以加载新内核。", expected_impact: "修复 2 个高危漏洞" },
+      { title: "开启 OPcache 预加载", category: "config", priority: "low", detail: "opcache.preload 指向框架引导文件。", expected_impact: "PHP 响应时间下降约 10%" },
+    ],
+    anomalies: [{ title: "夜间磁盘写入升高", detail: "02:00 备份任务期间写入达到 180 MB/s。", severity: "info" }],
+  },
+  54: {
+    health_score: 70,
+    summary: "空闲窗口审计发现 1 个严重与 2 个高危安全问题，均与网络暴露和认证方式有关。",
+    dimensions: dims(90, 80, 70, 74, 41, 78, 84),
+    root_causes: [{ title: "默认安装配置未加固", evidence: "sshd 与 mysqld 均使用发行版默认配置", confidence: "medium" }],
+    security_risks: [
+      { title: "数据库端口暴露在公网", severity: "critical", detail: "3306 对公网开放。", recommendation: "仅允许内网访问。" },
+      { title: "SSH 允许密码登录", severity: "high", detail: "PasswordAuthentication yes。", recommendation: "改为仅密钥登录。" },
+      { title: "容器以 root 运行", severity: "medium", detail: "两个容器未设置 USER。", recommendation: "在 Dockerfile 中添加非特权用户。" },
+      { title: "MySQL 慢查询日志开启", severity: "info", detail: "仅供参考。", recommendation: "保持开启并定期清理。" },
+    ],
+    recommendations: [
+      { title: "关闭 SSH 密码登录", category: "security", priority: "high", detail: "PasswordAuthentication no，并重启 sshd。", expected_impact: "杜绝密码暴力破解" },
+      { title: "容器使用非 root 用户", category: "infra", priority: "medium", detail: "在镜像中创建 app 用户。", expected_impact: "降低容器逃逸风险" },
+    ],
+    anomalies: [],
+  },
+};
+
+const reportSummaries: ReportSummary[] = (() => {
+  const now = Date.now();
+  return [
+    { id: 57, kind: "incident", created_at: now - 12 * MIN, health_score: 64, title: "PHP 错误激增事件分析", summary: diagnoses[57].summary, generated_by: "ai", model: "gpt-4.1-mini", run_id: "run_0c41" },
+    { id: 56, kind: "hourly", created_at: now - 55 * MIN, health_score: 81, title: "小时巡检", summary: diagnoses[56].summary, generated_by: "rules", model: null, run_id: "run_0c3f" },
+    { id: 55, kind: "daily", created_at: now - 15 * HOUR, health_score: 77, title: "每日健康报告", summary: diagnoses[55].summary, generated_by: "ai", model: "gpt-4.1-mini", run_id: "run_0c2a" },
+    { id: 54, kind: "audit", created_at: now - 2 * DAY, health_score: 70, title: "空闲窗口安全审计", summary: diagnoses[54].summary, generated_by: "ai", model: "gpt-4.1-mini", run_id: "run_0b97" },
+  ];
+})();
+
+function stepsFor(runId: string, start: number, kind: ReportKind, failed = false): AgentStep[] {
+  const s: AgentStep[] = [];
+  const push = (kindOf: AgentStep["kind"], partial: Partial<AgentStep>) =>
+    s.push({ seq: s.length + 1, ts: start + s.length * 3_200, kind: kindOf, tool: null, input: null, output: null, text: null, ...partial });
+  push("message", { text: `开始${kind === "incident" ? "事件" : "例行"}诊断，先读取主机快照。` });
+  push("tool_call", { tool: "get_health_snapshot", input: {} });
+  push("tool_result", { tool: "get_health_snapshot", output: { cpu_pct: 41.2, mem_pct: 66.1, load1: 3.4, mode: "high_log", alerts_open: { critical: 2, warning: 3, info: 1 } } });
+  push("tool_call", { tool: "query_log_clusters", input: { source: "php-error", level: "error", limit: 5 } });
+  push("tool_result", { tool: "query_log_clusters", output: [{ fingerprint: "c01a", count: 18204, template: "PHP Fatal error: Uncaught PDOException: SQLSTATE[HY000] [2002] Connection refused" }, { fingerprint: "c03c", count: 412, template: "Allowed memory size exhausted" }] });
+  push("tool_call", { tool: "get_db_status", input: { name: "main" } });
+  if (failed) {
+    push("error", { text: `模型请求超时（120 秒），运行 ${runId} 中止。` });
+    return s;
+  }
+  push("tool_result", { tool: "get_db_status", output: { ok: true, metrics: { connections: 148, max_connections: 151, threads_running: 22 } } });
+  push("message", { text: "连接数已接近上限，结合 queue-worker 重启循环判断为连接泄漏。生成诊断报告。" });
+  return s;
+}
+
+interface RunRecord { run: AgentRun; steps: AgentStep[] }
+
+const runs: RunRecord[] = (() => {
+  const now = Date.now();
+  const make = (id: string, trigger: string, kind: ReportKind, status: AgentRun["status"], startedAgo: number, durationMs: number, report: number | null, model: string | null, error: string | null): RunRecord => {
+    const started = now - startedAgo;
+    const steps = status === "fallback" ? [] : stepsFor(id, started, kind, status === "failed");
+    return { run: { id, trigger, kind, status, started_at: started, finished_at: started + durationMs, model, steps_count: steps.length, error, report_id: report }, steps };
+  };
+  return [
+    make("run_0c41", "alert", "incident", "succeeded", 13 * MIN, 52_000, 57, "gpt-4.1-mini", null),
+    make("run_0c3f", "schedule", "hourly", "fallback", 56 * MIN, 8_000, 56, null, "已达到每日 AI 预算的 80%，本次使用规则引擎"),
+    make("run_0c35", "manual", "hourly", "failed", 3 * HOUR, 120_000, null, "gpt-4.1-mini", "模型请求超时（120 秒）"),
+    make("run_0c2a", "schedule", "daily", "succeeded", 15 * HOUR, 74_000, 55, "gpt-4.1-mini", null),
+    make("run_0b97", "mode", "audit", "succeeded", 2 * DAY, 96_000, 54, "gpt-4.1-mini", null),
+  ];
+})();
+
+const ai: AiStatus = { enabled: true, reason: null, format: "responses", model: "gpt-4.1-mini", runs_today: 7, daily_budget: 24, running: null };
+let mode: ModeState = { mode: "high_log", reason: "php-error 每分钟错误数 5 分钟内上升 8 倍", since: Date.now() - 18 * MIN };
+
+// Stream simulation
+
+type Emit = <K extends StreamEventName>(event: K, data: StreamEventMap[K]) => void;
+const emitters = new Set<Emit>();
+const emit: Emit = (event, data) => emitters.forEach(fn => fn(event, structuredClone(data)));
+
+/** Starts the mock stream for one subscriber. Returns a function that stops it. */
+export function startMockStream(onEvent: Emit): () => void {
+  emitters.add(onEvent);
+  onEvent("mode", { ...mode });
+  let tick = 0;
+  const timer = setInterval(() => {
+    tick += 1;
+    onEvent("metrics", hostAt(Date.now()));
+    if (tick % 5 === 0) onEvent("containers", containersNow().map(({ history: _history, ...rest }) => rest));
+    if (tick % 25 === 0) {
+      const open = alerts.find(a => a.id === 119);
+      if (open) {
+        open.count += 3;
+        open.last_seen = Date.now();
+        onEvent("alert", { ...open });
+      }
+    }
+  }, 1000);
+  return () => {
+    clearInterval(timer);
+    emitters.delete(onEvent);
+  };
+}
+
+function simulateRun(kind: ReportKind): string {
+  const id = `run_${Math.floor(Date.now() / 1000).toString(16).slice(-4)}`;
+  const started = Date.now();
+  const record: RunRecord = { run: { id, trigger: "manual", kind, status: "running", started_at: started, finished_at: null, model: ai.model, steps_count: 0, error: null, report_id: null }, steps: [] };
+  runs.unshift(record);
+  ai.running = id;
+  const planned = stepsFor(id, started, kind);
+  emit("agent", { run_id: id, status: "running", step: null });
+  planned.forEach((step, index) => {
+    setTimeout(() => {
+      const live = { ...step, ts: Date.now() };
+      record.steps.push(live);
+      record.run.steps_count = record.steps.length;
+      emit("agent", { run_id: id, status: "running", step: live });
+      if (index === planned.length - 1) {
+        setTimeout(() => {
+          const reportId = Math.max(...reportSummaries.map(r => r.id)) + 1;
+          const summary: ReportSummary = { id: reportId, kind, created_at: Date.now(), health_score: 66, title: "手动巡检", summary: diagnoses[57].summary, generated_by: "ai", model: ai.model, run_id: id };
+          diagnoses[reportId] = { ...diagnoses[57], health_score: 66 };
+          reportSummaries.unshift(summary);
+          Object.assign(record.run, { status: "succeeded", finished_at: Date.now(), report_id: reportId });
+          ai.running = null;
+          ai.runs_today += 1;
+          emit("agent", { run_id: id, status: "succeeded", step: null });
+          emit("report", summary);
+        }, 1500);
+      }
+    }, 1500 * (index + 1));
+  });
+  return id;
+}
+
+// API
+
+function snapshot(): Snapshot {
+  const host = hostAt(Date.now());
+  const list = containersNow();
+  const open = alerts.filter(a => a.status === "open");
+  const latest = reportSummaries[0] ?? null;
+  return {
+    generated_at: Date.now(),
+    host,
+    health: { score: 68, dimensions: dims(74, 69, 72, 35, 52, 50, 62), source: "ai" },
+    mode: { ...mode },
+    containers: {
+      total: list.length,
+      running: list.filter(c => c.state === "running").length,
+      unhealthy: list.filter(c => c.health === "unhealthy").length,
+      restart_loops: list.filter(c => c.restart_loop).length,
+      oom: list.filter(c => c.oom_killed).length,
+    },
+    alerts_open: {
+      critical: open.filter(a => a.severity === "critical").length,
+      warning: open.filter(a => a.severity === "warning").length,
+      info: open.filter(a => a.severity === "info").length,
+    },
+    ai: { ...ai },
+    latest_report: latest,
+  };
+}
+
+export const mockApi: Api = {
+  status: () => delay({
+    version: "0.1.0-dev", platform: "linux-x86_64", started_at: BOOT - 2 * DAY, mode: { ...mode }, ai: { ...ai },
+    collectors: {
+      host: { ok: true, detail: null }, docker: { ok: true, detail: null }, logs: { ok: true, detail: null },
+      security: { ok: true, detail: null }, mysql: { ok: true, detail: null }, postgres: { ok: false, detail: "connection refused" },
+    },
+  }),
+  snapshot: () => delay(snapshot()),
+  metrics: range => delay(metricsFor(range), 400),
+  containers: () => delay(containersNow()),
+  containerLogs: (id, tail = 200) => {
+    try {
+      return delay({ lines: containerLogs(id, tail) });
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  },
+  logSources: () => delay(logSources),
+  logRates: () => delay(logRates()),
+  logClusters: (filter = {}) => delay(logClusters(filter)),
+  dailyErrors: (days = 365) => delay(dailyErrors(days)),
+  findings: (includeResolved = false) => delay(findings.filter(f => includeResolved || !f.resolved)),
+  ports: () => delay(ports),
+  db: () => delay(dbStatus()),
+  alerts: (status = "open", limit = 100) => delay(alerts.filter(a => status === "all" || a.status === "open").slice(0, limit)),
+  reports: (kind = "", limit = 50) => delay(reportSummaries.filter(r => !kind || r.kind === kind).slice(0, limit)),
+  latestReport: kind => {
+    const found = reportSummaries.find(r => !kind || r.kind === kind);
+    return found ? delay<Report>({ ...found, body: diagnoses[found.id] }) : Promise.reject(new ApiError(404, "no report"));
+  },
+  report: id => {
+    const found = reportSummaries.find(r => r.id === id);
+    return found ? delay<Report>({ ...found, body: diagnoses[found.id] }) : Promise.reject(new ApiError(404, "report not found"));
+  },
+  agentRuns: (limit = 50) => delay(runs.slice(0, limit).map(r => r.run)),
+  agentRun: id => {
+    const found = runs.find(r => r.run.id === id);
+    return found ? delay<AgentRunDetail>({ ...found.run, steps: found.steps }) : Promise.reject(new ApiError(404, "run not found"));
+  },
+  trigger: kind => {
+    if (ai.running) return new Promise((_, reject) => setTimeout(() => reject(new ApiError(409, "a run is already in progress")), 300));
+    return delay({ run_id: simulateRun(kind) });
+  },
+};
