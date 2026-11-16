@@ -1,0 +1,26 @@
+{
+  "name": "tsmonitor-agent-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI sidecar for TServerMonitor: talks to the model through the Vercel AI SDK, tools run in the Rust daemon",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && esbuild src/main.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/sidecar.mjs --legal-comments=none --banner:js=\"import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);\"",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.105",
+    "@ai-sdk/openai": "^4.0.118",
+    "ai": "^7.0.173"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

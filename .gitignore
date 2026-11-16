@@ -22,3 +22,4 @@ web/src/components/arc-pro/
 *.db-wal
 config.toml
 .DS_Store
+agent-sidecar/dist/
