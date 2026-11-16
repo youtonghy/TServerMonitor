@@ -7,7 +7,7 @@ import { MetricTicker, type TickerMetric } from "@/components/arc-pro/metric-tic
 import { RealtimeStream, type StreamPoint } from "@/components/arc-pro/realtime-stream/realtime-stream";
 import { api } from "@/api/client";
 import { useLiveMetrics, useLiveMode, useStreamEvent } from "@/api/live";
-import type { Alert, HostMetrics, Snapshot } from "@/api/types";
+import type { Alert, HostMetrics, MetricPoint, Snapshot } from "@/api/types";
 import { useQuery } from "@/api/useQuery";
 import { Facts, PageHeader, Panel, QueryView, Section, useNow } from "@/components/panel";
 import { formatBytes, formatDuration, formatPercent, formatRate, formatRelative, formatShortDateTime, formatTime, percentOf } from "@/lib/format";
@@ -41,6 +41,14 @@ function streamPoints(samples: HostMetrics[], pick: (m: HostMetrics) => number, 
     const value = pick(m);
     return { t: m.ts, value, anomaly: value >= alarm ? tag : undefined };
   });
+}
+
+/** Prepends stored points that are older than the first live sample. */
+function withHistory(points: MetricPoint[] | undefined, samples: HostMetrics[], pick: (p: MetricPoint) => number, live: StreamPoint[]): StreamPoint[] {
+  if (!points?.length) return live;
+  const first = samples[0]?.ts ?? Number.POSITIVE_INFINITY;
+  const seed = points.filter(p => p.ts < first).map(p => ({ t: p.ts, value: pick(p) }));
+  return seed.length ? [...seed, ...live] : live;
 }
 
 function tickerMetrics(samples: HostMetrics[]): TickerMetric[] {
@@ -95,8 +103,16 @@ export default function OverviewPage() {
 
   const host: HostMetrics | null = samples[samples.length - 1] ?? snapshot.data?.host ?? null;
   const interval = sampleInterval(samples);
-  const cpuPoints = useMemo(() => streamPoints(samples, m => m.cpu_pct, 90, "高负载"), [samples]);
-  const memPoints = useMemo(() => streamPoints(samples, m => percentOf(m.mem_used, m.mem_total), 92, "内存紧张"), [samples]);
+  // Seed the realtime charts with stored history so they are not empty until enough live samples arrive.
+  const history = useQuery(() => api.metrics("1h"), []);
+  const cpuPoints = useMemo(
+    () => withHistory(history.data?.points, samples, p => p.cpu_pct, streamPoints(samples, m => m.cpu_pct, 90, "高负载")),
+    [history.data, samples],
+  );
+  const memPoints = useMemo(
+    () => withHistory(history.data?.points, samples, p => p.mem_pct, streamPoints(samples, m => percentOf(m.mem_used, m.mem_total), 92, "内存紧张")),
+    [history.data, samples],
+  );
   const ticker = useMemo(() => tickerMetrics(samples.length ? samples : host ? [host] : []), [samples, host]);
   const mode = liveMode ?? snapshot.data?.mode ?? null;
 
