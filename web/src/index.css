@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* Arc tokens come from components/arc/foundation.css (imported in main.tsx). Fonts: Geist for display, Inter for body. */
+:root {
+  --font-geist: "Geist Variable";
+  --font-inter: "Inter Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC";
+}
+
+html, body { margin: 0; background: var(--background); color: var(--foreground); }
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  letter-spacing: var(--tracking-body);
+  line-height: var(--leading-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root { min-height: 100dvh; }
