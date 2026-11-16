@@ -75,7 +75,12 @@ pub fn spawn(state: &Shared) {
             }
 
             // daily report at the configured local time (or later the same day if missed)
-            if now.time() >= daily_at && once_per_day(&state, "last_daily_report").await {
+            // wait until some data exists before catching up on a missed daily report
+            let warmed_up = now_ms() - state.started_at >= 10 * 60_000;
+            if now.time() >= daily_at
+                && warmed_up
+                && once_per_day(&state, "last_daily_report").await
+            {
                 agent.trigger_background(ReportKind::Daily, "schedule:daily");
             }
 

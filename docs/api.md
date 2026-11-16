@@ -9,6 +9,10 @@ and `/mcp` request needs `Authorization: Bearer <token>`. Because `EventSource`
 cannot send headers, `GET /api/v1/stream` also accepts `?token=<token>`.
 A request without a valid token gets `401 {"error": "unauthorized"}`.
 
+Alert `source` is `host`, `docker`, `security`, `database` or a log source name. `DbStatus.metrics`
+keys vary by engine (e.g. `threads_connected`, `qps`, `buffer_hit_pct`, `connection_usage_pct`, `active`,
+`long_running`, `tps`); show unknown keys as-is.
+
 Errors use `{"error": "<message>"}` with a 4xx/5xx status.
 
 ## Types
@@ -64,7 +68,9 @@ interface ContainerInfo {
   status: string;           // docker human status, e.g. "Up 3 hours"
   health: string | null;    // healthy | unhealthy | starting | null
   restart_count: number; restart_loop: boolean; oom_killed: boolean;
-  cpu_pct: number; mem_used: number; mem_limit: number; net_rx: number; net_tx: number;
+  cpu_pct: number;          // like `docker stats`: 100 = one full core, can exceed 100
+  mem_used: number; mem_limit: number;   // mem_limit 0 = no memory limit set
+  net_rx: number; net_tx: number;        // cumulative bytes since container start
   started_at: number | null;
   history: { ts: number; cpu_pct: number; mem_used: number }[];   // last 60 samples
 }
@@ -111,7 +117,9 @@ interface ReportSummary {
 interface Report extends ReportSummary { body: Diagnosis }
 
 interface AgentRun {
-  id: string; trigger: string; kind: ReportKind;
+  id: string;
+  trigger: string;   // "manual" | "schedule:hourly" | "schedule:daily" | "schedule:idle-window" | "burst:<sources>" (+ " (deferred)")
+  kind: ReportKind;
   status: "running" | "succeeded" | "failed" | "fallback";
   started_at: number; finished_at: number | null; model: string | null;
   steps_count: number; error: string | null; report_id: number | null;
@@ -132,7 +140,7 @@ interface AgentStep {
 | GET | `/api/v1/containers` | `ContainerInfo[]` |
 | GET | `/api/v1/containers/{id}/logs?tail=200` | `{ lines: { ts: number \| null; stream: "stdout" \| "stderr"; text: string }[] }` (redacted) |
 | GET | `/api/v1/logs/sources` | `LogSource[]` |
-| GET | `/api/v1/logs/rates?range=24h` | `{ step_secs: number; series: { source: string; points: { ts: number; lines: number; errors: number }[] }[] }` |
+| GET | `/api/v1/logs/rates?range=1h\|6h\|24h\|7d\|30d` (default 24h) | `{ step_secs: number; series: { source: string; points: { ts: number; lines: number; errors: number }[] }[] }` |
 | GET | `/api/v1/logs/clusters?source=&level=&limit=100` | `LogCluster[]` sorted by `last_seen` desc |
 | GET | `/api/v1/logs/daily-errors?days=365` | `{ date: "YYYY-MM-DD"; count: number }[]` |
 | GET | `/api/v1/findings?include_resolved=false` | `Finding[]` |
@@ -152,10 +160,10 @@ interface AgentStep {
 | event | data |
 | --- | --- |
 | `metrics` | `HostMetrics` (every sample, default 10 s) |
-| `containers` | `ContainerInfo[]` without `history` (every container poll) |
+| `containers` | `ContainerInfo[]` without `history` (every container poll); append one point per event client-side |
 | `alert` | `Alert` (new or updated) |
 | `mode` | `{ mode: Mode; reason: string; since: number }` |
-| `agent` | `{ run_id: string; status: AgentRun["status"]; step: AgentStep \| null }` |
+| `agent` | `{ run_id: string; status: AgentRun["status"]; step: AgentStep \| null }` (`step` null = status change only) |
 | `report` | `ReportSummary` |
 
 A `ping` comment is sent every 15 s.

@@ -340,9 +340,7 @@ pub async fn on_containers(state: &Shared, list: &[ContainerInfo]) {
         }
         let fp = format!("container-mem:{}", c.name);
         let usage = pct(c.mem_used, c.mem_limit);
-        // docker reports the host memory as limit when no limit is set
-        let host_mem = state.read().host.as_ref().map(|h| h.mem_total).unwrap_or(0);
-        if c.mem_limit > 0 && c.mem_limit < host_mem && usage >= 90.0 {
+        if c.mem_limit > 0 && usage >= 90.0 {
             alerts::raise_logged(
                 state,
                 AlertInput {

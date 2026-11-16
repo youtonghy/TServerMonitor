@@ -175,6 +175,16 @@ async fn poll(docker: &Docker, state: &Shared, tracker: &mut Tracker) -> anyhow:
             if let Some(Ok(stats)) = docker.stats(&id, Some(opts)).next().await {
                 info.cpu_pct = cpu_percent(&stats);
                 (info.mem_used, info.mem_limit) = mem_used(&stats);
+                // docker reports host memory as the limit when none is set; expose that as 0
+                if inspect
+                    .host_config
+                    .as_ref()
+                    .and_then(|h| h.memory)
+                    .unwrap_or(0)
+                    == 0
+                {
+                    info.mem_limit = 0;
+                }
                 (info.net_rx, info.net_tx) = net_totals(&stats);
             }
             if state.cfg.docker.follow_logs {
