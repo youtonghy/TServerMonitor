@@ -1,0 +1,129 @@
+# TServerMonitor example configuration.
+# Copy to /etc/tsmonitor/config.toml (or ./config.toml) and adjust.
+# Secrets are NEVER read from this file: API keys, bot tokens and DSNs come from
+# environment variables whose names are configured below.
+
+[server]
+# Keep the dashboard on loopback. Binding to another address requires TSM_API_TOKEN.
+bind = "127.0.0.1:8787"
+token_env = "TSM_API_TOKEN"
+
+[storage]
+data_dir = "/var/lib/tsmonitor"
+raw_retention_days = 7       # 10 s samples
+rollup_retention_days = 90   # 5 min averages
+
+[collect]
+interval_secs = 10
+container_interval_secs = 15
+log_poll_secs = 2
+
+[docker]
+# Uses DOCKER_HOST when set. Point it at a read-only socket proxy, e.g.
+# DOCKER_HOST=tcp://127.0.0.1:2375 with tecnativa/docker-socket-proxy (CONTAINERS=1, EVENTS=1, POST=0).
+enabled = true
+follow_logs = true
+max_log_lines = 500
+
+# Log files followed side-channel. kind: php_error | php_slow | nginx_access |
+# nginx_error | node | mysql_slow | generic
+[[logs]]
+name = "php-fpm"
+path = "/var/log/php8.3-fpm.log"
+kind = "php_error"
+
+[[logs]]
+name = "nginx-error"
+path = "/var/log/nginx/error.log"
+kind = "nginx_error"
+
+[[logs]]
+name = "nginx-access"
+path = "/var/log/nginx/access.log"
+kind = "nginx_access"
+
+[security]
+enabled = true
+interval_secs = 900
+# auth_log = "/var/log/auth.log"   # auto-detected when omitted
+failed_login_threshold = 20
+check_updates = true
+
+# Read-only database metrics. The DSN comes from the named env var and must use a
+# read-only account, e.g. GRANT PROCESS, REPLICATION CLIENT ON *.* TO 'tsm'@'localhost';
+# [[databases]]
+# name = "main"
+# kind = "mysql"            # mysql | postgres
+# dsn_env = "TSM_DB_MAIN_DSN"
+# interval_secs = 60
+
+[schedule]
+hourly = true
+daily_at = "04:00"
+burst_factor = 3.0
+burst_min_errors_per_min = 20
+burst_cooldown_mins = 15
+idle_window = "01:00-05:00"
+idle_cpu_pct = 30
+yield_cpu_pct = 85
+yield_load_per_core = 1.5
+
+[thresholds]
+cpu_warn = 85
+cpu_crit = 95
+mem_warn = 85
+mem_crit = 95
+swap_warn = 50
+disk_warn = 85
+disk_crit = 95
+sustain_samples = 6
+alert_cooldown_mins = 30
+
+[ai]
+enabled = true
+node_bin = "node"     # Node.js 20+ runs the AI sidecar (Vercel AI SDK)
+daily_budget = 200    # max model-backed analyses per day
+max_steps = 12        # tool-call rounds per analysis
+timeout_secs = 300
+idle_exit_secs = 300
+
+# Any endpoint that speaks one of the two formats works: official APIs, relays, gateways.
+#   api_format = "messages"  -> POST {base_url}/messages   (Anthropic Messages)
+#   api_format = "responses" -> POST {base_url}/responses  (OpenAI Responses)
+[ai.profiles.default]
+api_format = "messages"
+base_url = "https://api.anthropic.com/v1"
+model = "claude-sonnet-5-5"
+api_key_env = "TSM_LLM_API_KEY"
+# auth = "bearer"   # for relays that expect Authorization: Bearer on /messages (default: x-api-key)
+
+# A cheaper profile for frequent checks, for example:
+# [ai.profiles.fast]
+# api_format = "responses"
+# base_url = "https://my-gateway.example.com/v1"
+# model = "my-small-model"
+# api_key_env = "TSM_LLM_FAST_KEY"
+
+[ai.routing]
+# report kind -> profile. Kinds: hourly | daily | incident | audit
+daily = "default"
+
+[sandbox]
+python = "python3"
+timeout_secs = 60
+max_output_bytes = 65536
+memory_mb = 512
+extra_read_paths = []
+
+[notify.telegram]
+enabled = false
+chat_id = ""
+token_env = "TSM_TELEGRAM_BOT_TOKEN"
+min_severity = "critical"
+send_daily_report = true
+warning_digest = true
+
+# [[notify.webhooks]]
+# url = "https://harms.example.com/hooks/tsmonitor"
+# secret_env = "TSM_WEBHOOK_SECRET"
+# events = ["alert", "report"]

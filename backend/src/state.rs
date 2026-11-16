@@ -1,0 +1,106 @@
+//! Shared daemon state: config, database, live in-memory view and the event bus.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, OnceLock, RwLock};
+
+use serde::Serialize;
+use tokio::sync::broadcast;
+
+use crate::agent::AgentManager;
+use crate::config::Config;
+use crate::model::{
+    ContainerInfo, DbStatus, Event, HostMetrics, LogSourceInfo, Mode, ModeState, PortInfo, now_ms,
+};
+use crate::notify::Notifier;
+use crate::store::Db;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectorStatus {
+    pub ok: bool,
+    pub detail: Option<String>,
+}
+
+#[derive(Default)]
+pub struct Live {
+    pub host: Option<HostMetrics>,
+    /// Recent CPU% samples, newest last, used for yield / idle decisions.
+    pub cpu_recent: VecDeque<f64>,
+    pub containers: Vec<ContainerInfo>,
+    pub container_history: BTreeMap<String, VecDeque<crate::model::ContainerPoint>>,
+    pub log_sources: BTreeMap<String, LogSourceInfo>,
+    pub ports: Vec<PortInfo>,
+    pub dbs: Vec<DbStatus>,
+    pub collectors: BTreeMap<String, CollectorStatus>,
+    /// Active burst sources -> since (ms).
+    pub bursts: BTreeMap<String, i64>,
+    pub yield_reason: Option<String>,
+    pub idle_audit_since: Option<i64>,
+    pub mode: Option<ModeState>,
+}
+
+pub struct AppState {
+    pub cfg: Arc<Config>,
+    pub db: Db,
+    pub events: broadcast::Sender<Event>,
+    pub live: RwLock<Live>,
+    pub started_at: i64,
+    pub notifier: Notifier,
+    agent: OnceLock<Arc<AgentManager>>,
+}
+
+pub type Shared = Arc<AppState>;
+
+impl AppState {
+    pub fn new(cfg: Arc<Config>, db: Db) -> Shared {
+        let (events, _) = broadcast::channel(512);
+        let notifier = Notifier::new(cfg.clone());
+        Arc::new(Self {
+            cfg,
+            db,
+            events,
+            live: RwLock::new(Live::default()),
+            started_at: now_ms(),
+            notifier,
+            agent: OnceLock::new(),
+        })
+    }
+
+    pub fn set_agent(&self, agent: Arc<AgentManager>) {
+        let _ = self.agent.set(agent);
+    }
+
+    pub fn agent(&self) -> Option<&Arc<AgentManager>> {
+        self.agent.get()
+    }
+
+    pub fn emit(&self, ev: Event) {
+        // No receivers is fine (nobody watching the dashboard).
+        let _ = self.events.send(ev);
+    }
+
+    pub fn read(&self) -> std::sync::RwLockReadGuard<'_, Live> {
+        self.live.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, Live> {
+        self.live.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn set_collector(&self, name: &str, ok: bool, detail: Option<String>) {
+        self.write()
+            .collectors
+            .insert(name.to_string(), CollectorStatus { ok, detail });
+    }
+
+    pub fn mode(&self) -> ModeState {
+        self.read().mode.clone().unwrap_or(ModeState {
+            mode: Mode::Normal,
+            reason: "常规调度".into(),
+            since: self.started_at,
+        })
+    }
+
+    pub fn is_yielding(&self) -> bool {
+        self.read().yield_reason.is_some()
+    }
+}

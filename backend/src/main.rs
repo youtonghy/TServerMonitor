@@ -1,0 +1,133 @@
+//! TServerMonitor: a zero-intrusion, read-only side-channel monitor with an AI ops advisor.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use tsmonitor::{agent, api, collect, config, rules, sandbox, schedule, state, store};
+
+#[derive(Parser)]
+#[command(
+    name = "tsmonitor",
+    version,
+    about = "Read-only server monitor with an AI ops advisor"
+)]
+struct Cli {
+    /// Path to config.toml
+    #[arg(short, long, default_value = "config.toml", global = true)]
+    config: PathBuf,
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the daemon (default)
+    Run,
+    /// Validate the config file and exit
+    CheckConfig,
+}
+
+fn main() -> Result<()> {
+    // the sandbox launcher must run before anything else (no runtime, no threads)
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("__sandbox-exec") {
+        std::process::exit(sandbox::launcher_main(&args[2..]));
+    }
+
+    let cli = Cli::parse();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("TSM_LOG")
+                .unwrap_or_else(|_| "info,sqlx=warn,rmcp=warn".into()),
+        )
+        .init();
+
+    let cfg = config::Config::load(&cli.config)?;
+    if matches!(cli.cmd, Some(Cmd::CheckConfig)) {
+        println!("config ok: {}", cli.config.display());
+        return Ok(());
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?
+        .block_on(run(cfg))
+}
+
+async fn run(cfg: config::Config) -> Result<()> {
+    let cfg = Arc::new(cfg);
+    let db = store::open(&cfg.storage.data_dir).await?;
+    store::close_stale_runs(&db).await?;
+    let state = state::AppState::new(cfg.clone(), db);
+
+    let sandbox = Arc::new(sandbox::Sandbox::init(
+        &cfg.storage.data_dir,
+        cfg.sandbox.clone(),
+    )?);
+    match sandbox::probe().await.as_str() {
+        "fully_enforced" => state.set_collector(
+            "sandbox",
+            true,
+            Some("Landlock 已启用（文件与网络隔离）".into()),
+        ),
+        "partially_enforced" => {
+            tracing::warn!(
+                "Landlock is only partially enforced (kernel < 6.7 cannot restrict network); scripts may reach the network"
+            );
+            state.set_collector(
+                "sandbox",
+                true,
+                Some("Landlock 部分生效：文件系统已隔离，内核版本过低无法限制网络".into()),
+            );
+        }
+        other => {
+            tracing::warn!(
+                "sandbox isolation level: {other}; analysis scripts only get path checks, rlimits and timeouts"
+            );
+            state.set_collector(
+                "sandbox",
+                false,
+                Some(format!(
+                    "内核级隔离不可用（{other}），仅有路径守卫、资源上限与超时"
+                )),
+            );
+        }
+    }
+    let agent = agent::AgentManager::init(&state, sandbox).await;
+    state.set_agent(agent);
+
+    rules::recompute_mode(&state);
+    collect::spawn_all(&state);
+    schedule::spawn(&state);
+
+    let listener = tokio::net::TcpListener::bind(cfg.server.bind)
+        .await
+        .with_context(|| format!("binding {}", cfg.server.bind))?;
+    tracing::info!("dashboard on http://{}", cfg.server.bind);
+    axum::serve(listener, api::router(state))
+        .with_graceful_shutdown(shutdown())
+        .await?;
+    Ok(())
+}
+
+async fn shutdown() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {},
+        () = term => {},
+    }
+    tracing::info!("shutting down");
+}
