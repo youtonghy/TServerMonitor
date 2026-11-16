@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 runners keep the glibc requirement low (2.35) for older servers
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARC_PRO_TOKEN: ${{ secrets.ARC_PRO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require Arc Pro token
+        if: env.ARC_PRO_TOKEN == ''
+        run: |
+          echo "::error::Repository secret ARC_PRO_TOKEN is required to build the dashboard."
+          exit 1
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: agent-sidecar/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build AI sidecar
+        run: |
+          pnpm -C agent-sidecar install --frozen-lockfile
+          pnpm -C agent-sidecar build
+      - name: Build dashboard
+        run: |
+          pnpm -C web install --frozen-lockfile
+          pnpm -C web arc:pro
+          pnpm -C web build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build tsmonitor (embeds dashboard and sidecar)
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          name=tsmonitor-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}
+          mkdir -p "$name"
+          cp target/release/tsmonitor deploy/config.example.toml deploy/tsmonitor.service README.md LICENSE "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tsmonitor-*.tar.gz
+            tsmonitor-*.tar.gz.sha256

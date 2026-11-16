@@ -1,0 +1,62 @@
+# systemd unit for TServerMonitor.
+# Install:
+#   sudo useradd --system --home /var/lib/tsmonitor --shell /usr/sbin/nologin tsmonitor
+#   sudo usermod -aG adm tsmonitor              # read /var/log/* (Debian/Ubuntu; use the log files' group elsewhere)
+#   sudo install -m 0755 tsmonitor /usr/local/bin/tsmonitor
+#   sudo install -d -m 0750 /etc/tsmonitor && sudo install -m 0640 config.example.toml /etc/tsmonitor/config.toml
+#   sudo install -m 0600 /dev/null /etc/tsmonitor/env   # then put secrets in it, e.g. TSM_LLM_API_KEY=...
+#   sudo cp tsmonitor.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now tsmonitor
+#
+# Docker: do NOT add tsmonitor to the docker group (that is root-equivalent). Run a read-only
+# socket proxy and set DOCKER_HOST in /etc/tsmonitor/env, see README.
+
+[Unit]
+Description=TServerMonitor read-only server monitor and AI ops advisor
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tsmonitor
+Group=tsmonitor
+SupplementaryGroups=adm
+ExecStart=/usr/local/bin/tsmonitor --config /etc/tsmonitor/config.toml
+EnvironmentFile=-/etc/tsmonitor/env
+Restart=on-failure
+RestartSec=10
+
+# Business first: hard caps for the daemon and everything it spawns (Node sidecar, Python scripts)
+CPUQuota=25%
+MemoryHigh=384M
+MemoryMax=512M
+TasksMax=128
+IOSchedulingClass=idle
+Nice=10
+
+# Read-only view of the host; the only writable place is the data directory
+StateDirectory=tsmonitor
+StateDirectoryMode=0750
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tsmonitor
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

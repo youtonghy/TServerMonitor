@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: agent-sidecar/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: agent-sidecar/pnpm-lock.yaml
+      - name: Build AI sidecar (typecheck + bundle)
+        run: |
+          pnpm -C agent-sidecar install --frozen-lockfile
+          pnpm -C agent-sidecar build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Python for sandbox tests
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  web:
+    runs-on: ubuntu-22.04
+    env:
+      # Arc Pro components are licensed and never committed; they are pulled at build time.
+      ARC_PRO_TOKEN: ${{ secrets.ARC_PRO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: agent-sidecar/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm -C web install --frozen-lockfile
+      - name: Install Arc Pro components
+        if: env.ARC_PRO_TOKEN != ''
+        run: pnpm -C web arc:pro
+      - name: Build dashboard
+        if: env.ARC_PRO_TOKEN != ''
+        run: pnpm -C web build
+      - name: Skip notice
+        if: env.ARC_PRO_TOKEN == ''
+        run: echo "::notice::ARC_PRO_TOKEN is not available (fork PR or secret missing); dashboard build skipped."
