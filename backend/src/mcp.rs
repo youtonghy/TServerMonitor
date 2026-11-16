@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::CallToolResult;
+use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::{ErrorData, tool, tool_router};
+use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -51,7 +51,7 @@ fn internal(e: anyhow::Error) -> ErrorData {
     ErrorData::internal_error("internal error", None)
 }
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl McpServer {
     #[tool(
         description = "Current server health snapshot: host metrics, health score, mode, container summary, open alert counts, AI status and the latest report summary."
@@ -130,4 +130,14 @@ pub fn service(state: Shared) -> StreamableHttpService<McpServer, LocalSessionMa
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )
+}
+
+#[tool_handler]
+impl ServerHandler for McpServer {
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build());
+        info.server_info = Implementation::new("tsmonitor", env!("CARGO_PKG_VERSION"));
+        info.instructions = Some("Read-only diagnostics of one server: health snapshot, alerts, findings and AI/rule reports.".into());
+        info
+    }
 }

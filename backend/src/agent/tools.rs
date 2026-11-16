@@ -1,6 +1,7 @@
 //! Tools exposed to the model. Two kinds only:
 //! 1. read-only queries over collected data;
 //! 2. workspace tools (export a redacted log sample, write a script, run it in the sandbox).
+//!
 //! Tool execution happens here in Rust; the Node sidecar only forwards calls.
 
 use anyhow::{Context, Result, bail};

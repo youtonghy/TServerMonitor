@@ -157,7 +157,9 @@ async fn poll(docker: &Docker, state: &Shared, tracker: &mut Tracker) -> anyhow:
             image: c.image.clone().unwrap_or_default(),
             state: state_str.clone(),
             status: c.status.clone().unwrap_or_default(),
+            // a stopped container keeps its last health status; only running ones count
             health: st
+                .filter(|_| running)
                 .and_then(|s| s.health.as_ref())
                 .and_then(|h| h.status)
                 .map(|h| h.to_string())

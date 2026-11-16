@@ -303,8 +303,7 @@ pub fn process(kind: LogKind, raw: &str) -> Record {
             // the statement is the last non-comment line
             let stmt = redacted
                 .lines()
-                .filter(|l| !l.starts_with('#') && !l.starts_with("SET timestamp"))
-                .last()
+                .rfind(|l| !l.starts_with('#') && !l.starts_with("SET timestamp"))
                 .unwrap_or("");
             template(stmt)
         }

@@ -66,6 +66,25 @@ impl Sidecar {
     }
 }
 
+/// Step body; `seq` and `ts` are filled in by `record`.
+fn draft(
+    kind: &str,
+    tool: Option<&str>,
+    input: Option<Value>,
+    output: Option<Value>,
+    text: Option<String>,
+) -> AgentStep {
+    AgentStep {
+        seq: 0,
+        ts: 0,
+        kind: kind.into(),
+        tool: tool.map(str::to_string),
+        input,
+        output,
+        text,
+    }
+}
+
 pub struct AgentManager {
     state: Weak<AppState>,
     sandbox: Arc<Sandbox>,
@@ -105,13 +124,12 @@ fn materialize_script(state: &AppState) -> Option<PathBuf> {
     let dir = state.cfg.storage.data_dir.join("sidecar");
     let path = dir.join("sidecar.mjs");
     let current = std::fs::read(&path).ok();
-    if current.as_deref() != Some(asset.data.as_ref()) {
-        if let Err(e) =
+    if current.as_deref() != Some(asset.data.as_ref())
+        && let Err(e) =
             std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, asset.data.as_ref()))
-        {
-            tracing::error!("writing AI sidecar script: {e}");
-            return None;
-        }
+    {
+        tracing::error!("writing AI sidecar script: {e}");
+        return None;
     }
     Some(path)
 }
@@ -168,11 +186,10 @@ impl AgentManager {
             let idle = Duration::from_secs(state.cfg.ai.idle_exit_secs);
             if let Ok(mut guard) = me.proc.try_lock()
                 && guard.as_ref().is_some_and(|s| s.last_used.elapsed() > idle)
+                && let Some(mut s) = guard.take()
             {
-                if let Some(mut s) = guard.take() {
-                    let _ = s.child.kill().await;
-                    tracing::debug!("AI sidecar stopped after idle timeout");
-                }
+                let _ = s.child.kill().await;
+                tracing::debug!("AI sidecar stopped after idle timeout");
             }
         }
     }
@@ -312,27 +329,10 @@ impl AgentManager {
         }
     }
 
-    async fn record(
-        &self,
-        state: &AppState,
-        run_id: &str,
-        seq: &mut i64,
-        kind: &str,
-        tool: Option<&str>,
-        input: Option<Value>,
-        output: Option<Value>,
-        text: Option<String>,
-    ) {
+    async fn record(&self, state: &AppState, run_id: &str, seq: &mut i64, mut step: AgentStep) {
         *seq += 1;
-        let step = AgentStep {
-            seq: *seq,
-            ts: now_ms(),
-            kind: kind.into(),
-            tool: tool.map(str::to_string),
-            input,
-            output,
-            text,
-        };
+        step.seq = *seq;
+        step.ts = now_ms();
         if let Err(e) = store::insert_step(&state.db, run_id, &step).await {
             tracing::warn!("storing agent step: {e:#}");
         }
@@ -417,11 +417,7 @@ impl AgentManager {
                         &state,
                         run_id,
                         &mut seq,
-                        "error",
-                        None,
-                        None,
-                        None,
-                        Some(msg.clone()),
+                        draft("error", None, None, None, Some(msg.clone())),
                     )
                     .await;
                 }
@@ -629,11 +625,7 @@ impl AgentManager {
                         state,
                         run_id,
                         seq,
-                        "tool_call",
-                        Some(&name),
-                        Some(input.clone()),
-                        None,
-                        None,
+                        draft("tool_call", Some(&name), Some(input.clone()), None, None),
                     )
                     .await;
                     let (output, is_error) = match tools::execute(&ctx, &name, &input).await {
@@ -644,11 +636,7 @@ impl AgentManager {
                         state,
                         run_id,
                         seq,
-                        "tool_result",
-                        Some(&name),
-                        None,
-                        Some(output.clone()),
-                        None,
+                        draft("tool_result", Some(&name), None, Some(output.clone()), None),
                     )
                     .await;
                     sc.send(&json!({ "type": "tool_result", "run_id": run_id, "call_id": call_id, "output": output, "is_error": is_error })).await?;
@@ -659,11 +647,7 @@ impl AgentManager {
                             state,
                             run_id,
                             seq,
-                            "message",
-                            None,
-                            None,
-                            None,
-                            Some(t.to_string()),
+                            draft("message", None, None, None, Some(t.to_string())),
                         )
                         .await;
                     }
