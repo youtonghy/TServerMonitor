@@ -1,0 +1,15 @@
+# Build context pruning for the local Docker image. Keep arc-pro inside: the dashboard build needs it.
+.git
+.github
+docs
+data
+target
+backend/target
+**/node_modules
+web/dist
+agent-sidecar/dist
+*.db
+*.db-shm
+*.db-wal
+config.toml
+.DS_Store

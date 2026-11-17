@@ -1,0 +1,82 @@
+# Local demo stack: the monitor, a read-only Docker socket proxy, and a tiny workload so the
+# container and log pages have something to show.
+#
+#   docker compose up -d --build
+#   open http://127.0.0.1:8787 and paste the token from TSM_API_TOKEN (default: tsm-local-demo)
+#
+# The dashboard lives at "/", the REST API under /api/v1, and MCP at /mcp.
+# Set TSM_API_TOKEN in a .env file (git-ignored) to use a different token.
+
+services:
+  tsmonitor:
+    build:
+      context: .
+      args:
+        # Optional: fetch the licensed Arc Pro components instead of using the local copy.
+        ARC_PRO_TOKEN: ${ARC_PRO_TOKEN:-}
+    image: tservermonitor:local
+    container_name: tsmonitor
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      TSM_API_TOKEN: ${TSM_API_TOKEN:-tsm-local-demo}
+      DOCKER_HOST: tcp://docker-proxy:2375
+      TSM_LOG: ${TSM_LOG:-info}
+    volumes:
+      - tsmonitor-data:/var/lib/tsmonitor
+      - ./docker/demo.toml:/etc/tsmonitor/config.toml:ro
+      - demo-logs:/var/log/demo:ro
+    depends_on:
+      - docker-proxy
+    # Mirrors the resource caps in deploy/tsmonitor.service (loosened a little for a laptop demo).
+    cpus: 1.0
+    mem_limit: 768m
+
+  # Read-only Docker API: only list/inspect/stats/logs/events. The daemon never needs the real socket.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: tsmonitor-docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      EVENTS: 1
+      INFO: 1
+      VERSION: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # Demo workload: real nginx traffic, so the dashboard's container and log pages are populated.
+  demo-nginx:
+    image: nginx:1.27-alpine
+    container_name: tsmonitor-demo-nginx
+    restart: unless-stopped
+    volumes:
+      - demo-logs:/var/log/demo
+      - ./docker/nginx-demo.conf:/etc/nginx/conf.d/default.conf:ro
+    mem_limit: 64m
+
+  demo-traffic:
+    image: alpine:3.20
+    container_name: tsmonitor-demo-traffic
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache curl >/dev/null 2>&1
+        i=0
+        while true; do
+          i=$$((i + 1))
+          curl -s -o /dev/null http://demo-nginx/
+          curl -s -o /dev/null "http://demo-nginx/missing-$$((i % 7))"
+          sleep 2
+        done
+    depends_on:
+      - demo-nginx
+    mem_limit: 64m
+
+volumes:
+  tsmonitor-data:
+  demo-logs:

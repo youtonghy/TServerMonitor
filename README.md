@@ -61,6 +61,21 @@
 
 检查配置：`tsmonitor --config /etc/tsmonitor/config.toml check-config`。
 
+### 本地 Docker 试跑
+
+仓库自带 `Dockerfile` 和 `docker-compose.yml`，一条命令把守护进程、只读 Docker 代理和一台产生真实日志的演示容器跑起来：
+
+```sh
+docker compose up -d --build        # 打开 http://127.0.0.1:8787，默认令牌 tsm-local-demo
+```
+
+- 大屏、REST API、MCP 共用 8787 端口。`docker/demo.toml` 是演示配置，监听 `0.0.0.0`，所以必须带 `TSM_API_TOKEN`（默认值仅用于本机试跑，可在 `.env` 里改）。
+- 采集数据存在 `tsmonitor-data` 卷里，`docker compose down -v` 会连数据一起清掉。
+- 容器采集走 `tecnativa/docker-socket-proxy`（只读），不需要把真实套接字交给守护进程。
+- 演示容器 `demo-nginx` + `demo-traffic` 生成真实访问日志，供容器页和日志页展示；不需要可以删掉这两个服务。
+- 镜像里 `[ai] enabled = false`（没有模型密钥）。填好 `TSM_LLM_API_KEY` 并改成 `true` 即可打开 AI 分析。
+- 大屏构建需要 Arc Pro 组件：本机已有 `web/src/components/arc-pro/`（本地副本，git 忽略）时直接构建；在别的机器上执行 `ARC_PRO_TOKEN=... docker compose build`，镜像会自己拉取。
+
 ### Docker 只读接入
 
 不要把 `tsmonitor` 用户加入 `docker` 组（等同 root）。推荐用只读代理：

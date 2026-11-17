@@ -1,0 +1,93 @@
+# Local Docker demo config, mounted at /etc/tsmonitor/config.toml by docker-compose.yml.
+# Adjust paths/logs or point the compose file at deploy/config.example.toml for a real host.
+# Secrets never come from this file: read them from the environment variables named below.
+
+[server]
+# Inside the container the daemon must listen on all interfaces for the published port to work.
+# A non-loopback bind requires TSM_API_TOKEN, which docker-compose.yml sets.
+bind = "0.0.0.0:8787"
+token_env = "TSM_API_TOKEN"
+
+[storage]
+data_dir = "/var/lib/tsmonitor"
+raw_retention_days = 7
+rollup_retention_days = 90
+
+[collect]
+interval_secs = 10
+container_interval_secs = 15
+log_poll_secs = 2
+
+[docker]
+# DOCKER_HOST points at the read-only socket proxy from docker-compose.yml.
+enabled = true
+follow_logs = true
+max_log_lines = 500
+
+# The demo nginx container writes real access logs into a shared volume.
+[[logs]]
+name = "demo-nginx"
+path = "/var/log/demo/access.log"
+kind = "nginx_access"
+
+[security]
+enabled = true
+interval_secs = 900
+# The container has no apt/dnf index, so the pending-update check would only report noise.
+check_updates = false
+failed_login_threshold = 20
+
+[schedule]
+hourly = true
+daily_at = "04:00"
+burst_factor = 3.0
+burst_min_errors_per_min = 20
+burst_cooldown_mins = 15
+idle_window = "01:00-05:00"
+idle_cpu_pct = 30
+yield_cpu_pct = 85
+yield_load_per_core = 1.5
+
+[thresholds]
+cpu_warn = 85
+cpu_crit = 95
+mem_warn = 85
+mem_crit = 95
+swap_warn = 50
+disk_warn = 85
+disk_crit = 95
+sustain_samples = 6
+alert_cooldown_mins = 30
+
+[ai]
+# Rule-based reports only until you add TSM_LLM_API_KEY and set enabled = true.
+enabled = false
+node_bin = "node"
+daily_budget = 200
+max_steps = 12
+timeout_secs = 300
+idle_exit_secs = 300
+
+[ai.profiles.default]
+api_format = "messages"
+base_url = "https://api.anthropic.com/v1"
+model = "claude-sonnet-5-5"
+api_key_env = "TSM_LLM_API_KEY"
+
+[ai.routing]
+daily = "default"
+
+[sandbox]
+python = "python3"
+timeout_secs = 60
+max_output_bytes = 65536
+memory_mb = 512
+extra_read_paths = []
+
+[notify.telegram]
+enabled = false
+chat_id = ""
+token_env = "TSM_TELEGRAM_BOT_TOKEN"
+min_severity = "critical"
+send_daily_report = true
+warning_digest = true
