@@ -23,22 +23,29 @@ pub const SYSTEM: &str = r#"你是 TServerMonitor 的运维分析参谋，一个
 - 建议要具体到可执行的层面（哪个文件/配置项/参数/SQL/代码位置，改成什么），但只给建议，不执行。
 - 全部使用简体中文输出。health_score 与各维度评分为 0~100，越高越健康。没有问题的维度给高分，不要凭空编造问题；数组可以为空。"#;
 
-fn task(kind: ReportKind, trigger: &str) -> String {
-    match kind {
-        ReportKind::Hourly => "任务：小时巡检。快速判断过去一小时是否有异常趋势或需要关注的问题，结论简明。建议最多 3 条。".to_string(),
-        ReportKind::Daily => "任务：生成每日运维简报。回顾过去 24 小时（必要时对比 7 天）的资源趋势、错误与慢日志模式、容器稳定性、数据库表现和安全体检结果，输出系统运行瓶颈与按优先级排序的代码/配置/架构改良建议（5~10 条）。可调用 get_report_history 对比之前的结论。".to_string(),
-        ReportKind::Incident => format!(
-            "任务：异常事件分析（触发原因：{trigger}）。系统检测到日志或错误突增，已进入深度日志分析模式。请定位突增来源，找出主要错误模板和首次出现时间，结合资源与容器状态判断根因，并给出止血和根治建议。"
-        ),
-        ReportKind::Audit => "任务：空闲窗口深度审计。对历史日志做回溯（可导出样本用脚本统计），并对安全基线（端口暴露、登录爆破、更新、内核与 SSH 配置）和性能隐患做系统性审计，输出审计结论与整改清单。".to_string(),
-    }
+/// Task text for a run; a configured task brings its own prompt from the library.
+fn task(kind: ReportKind, trigger: &str, custom: Option<&str>) -> String {
+    use super::library::{AUDIT, DAILY, HOURLY, INCIDENT};
+    let text = match (kind, custom) {
+        (_, Some(c)) => c,
+        (ReportKind::Hourly, _) => HOURLY,
+        (ReportKind::Daily, _) => DAILY,
+        (ReportKind::Incident, _) => INCIDENT,
+        (ReportKind::Audit | ReportKind::Custom, _) => AUDIT,
+    };
+    text.replace("{trigger}", trigger)
 }
 
 /// Compact context snapshot so the model starts with the essentials.
-pub async fn user_prompt(state: &Shared, kind: ReportKind, trigger: &str) -> Result<String> {
+pub async fn user_prompt(
+    state: &Shared,
+    kind: ReportKind,
+    trigger: &str,
+    custom: Option<&str>,
+) -> Result<String> {
     let window_ms = match kind {
         ReportKind::Hourly | ReportKind::Incident => 3_600_000,
-        ReportKind::Daily | ReportKind::Audit => 24 * 3_600_000,
+        ReportKind::Daily | ReportKind::Audit | ReportKind::Custom => 24 * 3_600_000,
     };
     let since = now_ms() - window_ms;
     let findings = store::list_findings(&state.db, false).await?;
@@ -102,7 +109,7 @@ pub async fn user_prompt(state: &Shared, kind: ReportKind, trigger: &str) -> Res
     };
     Ok(format!(
         "{}\n\n以下是当前的上下文快照（JSON，数据已脱敏）：\n```json\n{}\n```\n\n完成分析后，按要求的结构输出最终诊断。",
-        task(kind, trigger),
+        task(kind, trigger, custom),
         serde_json::to_string_pretty(&ctx)?
     ))
 }

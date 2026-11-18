@@ -669,8 +669,8 @@ pub async fn list_conversations(
     limit: i64,
 ) -> Result<Vec<Conversation>> {
     let filter = match kind {
-        Some("chat") => "WHERE c.kind = 'chat'",
-        Some("task") => "WHERE c.kind <> 'chat'",
+        Some("chat") => "WHERE c.kind IN ('chat', 'prompt_gen')",
+        Some("task") => "WHERE c.kind NOT IN ('chat', 'prompt_gen')",
         _ => "",
     };
     let sql = format!(

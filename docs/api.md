@@ -172,6 +172,15 @@ interface AgentStep {
 | POST (admin) | `/api/v1/conversations/{id}/messages` body `{ text }` (≤ 8000 chars) | `202 { run_id }`; `409` while this conversation has a running turn or both interactive slots are busy |
 | DELETE (admin) | `/api/v1/conversations/{id}` | `{ ok: true }`; only `kind = "chat"` (scheduled runs are kept with their reports) |
 | POST (admin) | `/api/v1/agent/runs/{id}/cancel` | `{ ok: true }`; `404` when the run is not active |
+| GET | `/api/v1/tasks` | `{ tasks: Task[]; system: SystemJob[] }` (`system` = fixed `[schedule]` jobs, read-only) |
+| POST (admin) | `/api/v1/tasks` body `TaskInput` (`name`, `trigger`, `prompt_id` required) | `{ id }` |
+| PATCH (admin) | `/api/v1/tasks/{id}` body `TaskInput` | `{ id }` |
+| DELETE (admin) | `/api/v1/tasks/{id}` | `{ ok: true }`; built-in tasks can only be disabled (`400`) |
+| POST (admin) | `/api/v1/tasks/{id}/run` | `{ run_id: string \| null; deferred: boolean }` (deferred while another analysis runs or the host is busy) |
+| GET | `/api/v1/prompts` | `Prompt[]` (built-ins first) |
+| POST (admin) | `/api/v1/prompts` body `{ name, description?, body }` | `{ id }` |
+| PATCH / DELETE (admin) | `/api/v1/prompts/{id}` | built-ins are read-only (`400`); a prompt used by a task cannot be deleted (`400`) |
+| POST (admin) | `/api/v1/prompts/generate` body `{ description }` | `{ body }` drafted by the model (route `prompt_gen`, no tools; recorded as a conversation); `502` with the reason on failure |
 | GET | `/api/v1/settings/routing` | `{ kinds: { kind, label, resolved: ResolvedModel \| null }[]; efforts: Effort[]; routes: Route[] }` |
 | PUT (admin) | `/api/v1/settings/routing` body `{ routes: Route[] }` | same as GET; replaces all routes |
 
@@ -193,6 +202,19 @@ interface Conversation {
   id: string; title: string; kind: string /* "chat" or a report kind */; context: object | null;
   created_at: number; updated_at: number; last_status: AgentRun["status"] | null; runs: number;
 }
+type Trigger =
+  | { type: "interval"; every_mins: number }            // 5..10080
+  | { type: "daily"; at: "HH:MM" }                       // local time, fires once per day (catch-up later the same day)
+  | { type: "log_threshold"; source: string | null; metric: "lines" | "errors"; count: number; min_interval_mins: number }
+  | { type: "burst" }                                    // with the built-in incident analysis
+  | { type: "manual" };
+interface Task {
+  id: string; name: string; enabled: boolean; builtin: boolean; trigger: Trigger; prompt_id: string;
+  route_kind: string; last_fired_at: number | null; cursor: number | null; last_run_id: string | null;
+  created_at: number; updated_at: number;
+}
+interface Prompt { id: string; name: string; description: string; body: string; builtin: boolean; route_kind: string; updated_at: number | null }
+// Task runs are reports with kind "custom"; their conversation kind is the task's route_kind.
 interface ResolvedModel { provider: string; source: "db" | "config"; api_format: ApiFormat; base_url: string; model: string; auth: AuthStyle; effort: Effort }
 ```
 

@@ -387,6 +387,8 @@ pub enum ReportKind {
     Daily,
     Incident,
     Audit,
+    /// A user-configured task from `scheduled_tasks`.
+    Custom,
 }
 
 impl ReportKind {
@@ -396,6 +398,7 @@ impl ReportKind {
             Self::Daily => "daily",
             Self::Incident => "incident",
             Self::Audit => "audit",
+            Self::Custom => "custom",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -404,6 +407,7 @@ impl ReportKind {
             "daily" => Some(Self::Daily),
             "incident" => Some(Self::Incident),
             "audit" => Some(Self::Audit),
+            "custom" => Some(Self::Custom),
             _ => None,
         }
     }
@@ -413,6 +417,7 @@ impl ReportKind {
             Self::Daily => "每日运维简报",
             Self::Incident => "异常事件分析",
             Self::Audit => "深度审计",
+            Self::Custom => "自定义任务",
         }
     }
 }

@@ -116,6 +116,7 @@ pub fn spawn(state: &Shared) {
                 }
             }
 
+            crate::tasks::tick(&state).await;
             agent.run_deferred();
         }
     });

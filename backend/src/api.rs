@@ -627,6 +627,109 @@ async fn delete_conversation(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ---------------------------------------------------------------- prompts & tasks
+
+async fn get_prompts(State(state): State<Shared>) -> ApiResult<Vec<crate::agent::library::Prompt>> {
+    Ok(Json(crate::agent::library::list(&state.db).await?))
+}
+
+async fn post_prompt(
+    State(state): State<Shared>,
+    Json(b): Json<crate::agent::library::PromptInput>,
+) -> ApiResult<Value> {
+    let id = crate::agent::library::create(&state.db, b).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn patch_prompt(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Json(b): Json<crate::agent::library::PromptInput>,
+) -> ApiResult<Value> {
+    if !crate::agent::library::update(&state.db, &id, b).await? {
+        return Err(not_found("prompt"));
+    }
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn delete_prompt(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    if !crate::agent::library::delete(&state.db, &id).await? {
+        return Err(not_found("prompt"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct GenerateBody {
+    description: String,
+}
+
+async fn post_generate_prompt(
+    State(state): State<Shared>,
+    Json(b): Json<GenerateBody>,
+) -> ApiResult<Value> {
+    let description = clean_message(&b.description)?;
+    let title: String = format!(
+        "生成提示词：{}",
+        description.chars().take(24).collect::<String>()
+    );
+    let spec = crate::agent::ChatSpec {
+        route: "prompt_gen".into(),
+        system: Some(crate::agent::library::GENERATOR_SYSTEM.into()),
+        tools: false,
+    };
+    match agent_of(&state)?
+        .complete("prompt_gen", &title, spec, &description)
+        .await
+    {
+        Ok(body) => Ok(Json(json!({ "body": body.trim() }))),
+        Err(e) => Err(ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}"))),
+    }
+}
+
+async fn get_tasks(State(state): State<Shared>) -> ApiResult<Value> {
+    Ok(Json(json!({
+        "tasks": crate::tasks::list(&state.db).await?,
+        "system": crate::tasks::system_jobs(&state),
+    })))
+}
+
+async fn post_task(
+    State(state): State<Shared>,
+    Json(b): Json<crate::tasks::TaskInput>,
+) -> ApiResult<Value> {
+    let id = crate::tasks::create(&state.db, b).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn patch_task(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Json(b): Json<crate::tasks::TaskInput>,
+) -> ApiResult<Value> {
+    if !crate::tasks::update(&state.db, &id, b).await? {
+        return Err(not_found("task"));
+    }
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn delete_task(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    if !crate::tasks::delete(&state.db, &id).await? {
+        return Err(not_found("task"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn post_run_task(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    let task = crate::tasks::get(&state.db, &id)
+        .await?
+        .ok_or_else(|| not_found("task"))?;
+    let run_id = crate::tasks::fire(&state, &task, "manual").await?;
+    Ok(Json(
+        json!({ "run_id": run_id, "deferred": run_id.is_none() }),
+    ))
+}
+
 async fn post_cancel(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     if !agent_of(&state)?.cancel(&id).await {
         return Err(not_found("running run"));
@@ -866,6 +969,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/settings/routing", get(get_routing))
         .route("/api/v1/conversations", get(get_conversations))
         .route("/api/v1/conversations/{id}", get(get_conversation))
+        .route("/api/v1/prompts", get(get_prompts))
+        .route("/api/v1/tasks", get(get_tasks))
         .nest_service("/mcp", crate::mcp::service(state.clone()));
     let admin = Router::new()
         .route("/api/v1/settings/providers", post(post_provider))
@@ -882,6 +987,15 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/api/v1/conversations/{id}/messages", post(post_message))
         .route("/api/v1/agent/runs/{id}/cancel", post(post_cancel))
+        .route("/api/v1/prompts", post(post_prompt))
+        .route("/api/v1/prompts/generate", post(post_generate_prompt))
+        .route(
+            "/api/v1/prompts/{id}",
+            patch(patch_prompt).delete(delete_prompt),
+        )
+        .route("/api/v1/tasks", post(post_task))
+        .route("/api/v1/tasks/{id}", patch(patch_task).delete(delete_task))
+        .route("/api/v1/tasks/{id}/run", post(post_run_task))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_admin,

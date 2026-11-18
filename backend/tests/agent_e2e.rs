@@ -71,7 +71,8 @@ fn messages_stream(body: &Value) -> axum::response::Response {
         "message_start",
         json!({ "type": "message_start", "message": { "id": "msg_s", "type": "message", "role": "assistant", "model": "fake", "content": [], "stop_reason": null, "stop_sequence": null, "usage": usage } }),
     );
-    let stop = if !has_tool_result_messages(body) {
+    let no_tools = body["tools"].as_array().is_none_or(|t| t.is_empty());
+    let stop = if !no_tools && !has_tool_result_messages(body) {
         out += &ev(
             "content_block_start",
             json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "toolu_s1", "name": "get_host_metrics", "input": {} } }),
@@ -553,4 +554,94 @@ async fn chat_streams_and_runs_alongside_background() {
     assert!(last.to_string().contains("主机运行正常。"));
     assert!(last.to_string().contains("那磁盘呢？"));
     assert!(!requests.iter().any(|r| r.to_string().contains("chat-key")));
+}
+
+/// A configured task runs with its library prompt and saves a custom report; prompt generation
+/// is a tool-less request recorded as its own conversation.
+#[tokio::test]
+async fn custom_task_and_prompt_generation() {
+    if sidecar_path().is_none() {
+        eprintln!("node or built sidecar missing, skipping");
+        return;
+    }
+    let (base_url, log) = fake_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: unique variable name for this test.
+    unsafe { std::env::set_var("TSM_TEST_KEY_TASK", "task-key") };
+    let mut cfg = Config::default();
+    cfg.storage.data_dir = dir.path().to_path_buf();
+    cfg.ai.sidecar_path = sidecar_path();
+    cfg.ai.timeout_secs = 60;
+    cfg.ai.profiles = BTreeMap::from([(
+        "default".to_string(),
+        ModelProfile {
+            api_format: ApiFormat::Messages,
+            base_url,
+            model: "fake-model".into(),
+            api_key_env: "TSM_TEST_KEY_TASK".into(),
+            auth: AuthStyle::ApiKey,
+        },
+    )]);
+    let cfg = Arc::new(cfg);
+    let state = state::AppState::new(cfg.clone(), store::open(dir.path()).await.unwrap());
+    let sb = Arc::new(sandbox::Sandbox::init(dir.path(), cfg.sandbox.clone()).unwrap());
+    let mgr = agent::AgentManager::init(&state, sb).await;
+    state.set_agent(mgr.clone());
+
+    let task = tsmonitor::tasks::get(&state.db, "t_security_check")
+        .await
+        .unwrap()
+        .unwrap();
+    let run_id = tsmonitor::tasks::fire(&state, &task, "test")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut done = None;
+    for _ in 0..300 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some((r, _)) = store::get_run(&state.db, &run_id).await.unwrap()
+            && r.status != "running"
+        {
+            done = Some(r);
+            break;
+        }
+    }
+    let r = done.expect("task run finished");
+    assert_eq!(r.status, "succeeded", "{:?}", r.error);
+    assert_eq!(r.kind, "custom");
+    let report = store::get_report(&state.db, r.report_id, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(report.summary.title.starts_with("每日本机安全体检"));
+    let conv = store::get_conversation(&state.db, r.conversation_id.as_deref().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(conv.kind, "security_check");
+    let first = log.lock().unwrap()[0].to_string();
+    assert!(
+        first.contains("每日本机安全体检"),
+        "task prompt reaches the model"
+    );
+    let after = tsmonitor::tasks::get(&state.db, "t_security_check")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.last_run_id.as_deref(), Some(run_id.as_str()));
+
+    let body = mgr
+        .complete(
+            "prompt_gen",
+            "生成提示词：测试",
+            agent::ChatSpec {
+                route: "prompt_gen".into(),
+                system: Some(agent::library::GENERATOR_SYSTEM.into()),
+                tools: false,
+            },
+            "检查 nginx 5xx",
+        )
+        .await
+        .unwrap();
+    assert_eq!(body, "主机运行正常。");
 }

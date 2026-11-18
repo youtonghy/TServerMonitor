@@ -98,7 +98,7 @@ pub fn definitions() -> Vec<Value> {
             "name": "get_report_history",
             "description": "历史分析报告摘要，用于对比趋势。",
             "input_schema": { "type": "object", "properties": {
-                "kind": { "type": "string", "enum": ["hourly", "daily", "incident", "audit"] },
+                "kind": { "type": "string", "enum": ["hourly", "daily", "incident", "audit", "custom"] },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 30 }
             }, "additionalProperties": false }
         }),

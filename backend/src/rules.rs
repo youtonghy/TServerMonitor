@@ -276,6 +276,9 @@ pub async fn on_log_checks(state: &Shared, checks: &[BurstCheck]) {
                 &format!("burst:{}", started.join(",")),
             );
         }
+        if fire {
+            crate::tasks::on_burst(state, &started.join(",")).await;
+        }
     }
 }
 

@@ -18,6 +18,7 @@
 //! Runs use one of two lanes: a single background lane for scheduled analyses and a small
 //! interactive lane for conversations, so chatting never waits for (or blocks) a daily report.
 
+pub mod library;
 pub mod prompt;
 pub mod tools;
 
@@ -42,6 +43,64 @@ use crate::store;
 #[folder = "../agent-sidecar/dist/"]
 #[allow_missing = true]
 struct SidecarAsset;
+
+/// A configured task (`scheduled_tasks`) to run as a custom analysis.
+#[derive(Debug, Clone)]
+pub struct TaskSpec {
+    pub id: String,
+    pub name: String,
+    /// Routing kind that picks the model.
+    pub route: String,
+    /// Task text from the prompt library.
+    pub prompt: String,
+}
+
+/// Background work: a fixed report kind or a configured task.
+#[derive(Debug, Clone)]
+enum Job {
+    Report(ReportKind),
+    Task(TaskSpec),
+}
+
+impl Job {
+    fn kind(&self) -> ReportKind {
+        match self {
+            Job::Report(k) => *k,
+            Job::Task(_) => ReportKind::Custom,
+        }
+    }
+    /// Deferred jobs are de-duplicated by this key.
+    fn key(&self) -> String {
+        match self {
+            Job::Report(k) => k.as_str().to_string(),
+            Job::Task(t) => t.id.clone(),
+        }
+    }
+    fn route(&self) -> &str {
+        match self {
+            Job::Report(k) => k.as_str(),
+            Job::Task(t) => &t.route,
+        }
+    }
+}
+
+/// How a conversation turn is run.
+pub struct ChatSpec {
+    pub route: String,
+    /// Replaces the conversation system prompt (prompt generation).
+    pub system: Option<String>,
+    pub tools: bool,
+}
+
+impl Default for ChatSpec {
+    fn default() -> Self {
+        Self {
+            route: "chat".into(),
+            system: None,
+            tools: true,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TriggerError {
@@ -157,7 +216,7 @@ pub struct AgentManager {
     cancelled: Mutex<HashSet<String>>,
     last_used: Mutex<Instant>,
     /// Scheduled work postponed while the host is busy.
-    deferred: Mutex<Vec<(ReportKind, String)>>,
+    deferred: Mutex<Vec<(Job, String)>>,
 }
 
 async fn node_version(bin: &str) -> Option<(PathBuf, u32)> {
@@ -279,7 +338,7 @@ impl AgentManager {
     }
 
     /// Why a model-backed run is not possible right now (None = possible).
-    async fn unavailable(&self, state: &AppState, route: &str) -> Option<String> {
+    async fn unavailable(&self, state: &AppState, route: &str, chat: bool) -> Option<String> {
         if let Some(r) = &self.static_reason {
             return Some(r.clone());
         }
@@ -294,7 +353,6 @@ impl AgentManager {
             });
         }
         // conversations and background analyses each get the full daily budget
-        let chat = route == "chat";
         if Self::runs_today(state, chat).await >= state.cfg.ai.daily_budget {
             return Some(format!(
                 "今日{}次数已达上限（{}）",
@@ -310,7 +368,7 @@ impl AgentManager {
             return AiStatus::default();
         };
         let profile = self.profile(&state, "daily");
-        let reason = self.unavailable(&state, "daily").await;
+        let reason = self.unavailable(&state, "daily", false).await;
         AiStatus {
             enabled: reason.is_none(),
             reason,
@@ -353,6 +411,15 @@ impl AgentManager {
         kind: ReportKind,
         trigger: &str,
     ) -> Result<String, TriggerError> {
+        self.start_job(Job::Report(kind), trigger)
+    }
+
+    /// Starts a configured task now, or defers it while the host or the lane is busy.
+    pub fn trigger_task(self: &Arc<Self>, task: TaskSpec, trigger: &str) -> Option<String> {
+        self.background(Job::Task(task), trigger)
+    }
+
+    fn start_job(self: &Arc<Self>, job: Job, trigger: &str) -> Result<String, TriggerError> {
         let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
         let conversation = format!("c_{run_id}");
         {
@@ -372,7 +439,7 @@ impl AgentManager {
         let id = run_id.clone();
         let trigger = trigger.to_string();
         tokio::spawn(async move {
-            if let Err(e) = me.execute(&id, kind, &trigger).await {
+            if let Err(e) = me.execute(&id, &job, &trigger).await {
                 tracing::error!("analysis {id} failed: {e:#}");
             }
             me.finish_active(&id);
@@ -382,23 +449,34 @@ impl AgentManager {
 
     /// Scheduler/rule entry point: defers while the host is busy or another run is active.
     pub fn trigger_background(self: &Arc<Self>, kind: ReportKind, trigger: &str) {
+        self.background(Job::Report(kind), trigger);
+    }
+
+    fn background(self: &Arc<Self>, job: Job, trigger: &str) -> Option<String> {
         let busy_host = self.state.upgrade().is_some_and(|s| s.is_yielding());
         if busy_host {
-            self.defer(kind, trigger);
-            return;
+            self.defer(job, trigger);
+            return None;
         }
-        match self.trigger(kind, trigger) {
-            Ok(id) => tracing::info!("analysis {id} started ({}, {trigger})", kind.as_str()),
-            Err(TriggerError::Busy(_)) => self.defer(kind, trigger),
-            Err(TriggerError::NotFound) => {}
+        let key = job.key();
+        match self.start_job(job.clone(), trigger) {
+            Ok(id) => {
+                tracing::info!("analysis {id} started ({key}, {trigger})");
+                Some(id)
+            }
+            Err(TriggerError::Busy(_)) => {
+                self.defer(job, trigger);
+                None
+            }
+            Err(TriggerError::NotFound) => None,
         }
     }
 
-    fn defer(&self, kind: ReportKind, trigger: &str) {
+    fn defer(&self, job: Job, trigger: &str) {
         let mut d = lock(&self.deferred);
-        if !d.iter().any(|(k, _)| *k == kind) {
-            tracing::info!("analysis {} deferred ({trigger})", kind.as_str());
-            d.push((kind, trigger.to_string()));
+        if !d.iter().any(|(j, _)| j.key() == job.key()) {
+            tracing::info!("analysis {} deferred ({trigger})", job.key());
+            d.push((job, trigger.to_string()));
         }
     }
 
@@ -415,8 +493,8 @@ impl AgentManager {
                 Some(d.remove(0))
             }
         };
-        if let Some((kind, trigger)) = next {
-            self.trigger_background(kind, &format!("{trigger} (deferred)"));
+        if let Some((job, trigger)) = next {
+            self.background(job, &format!("{trigger} (deferred)"));
         }
     }
 
@@ -432,10 +510,62 @@ impl AgentManager {
             .ok()
             .flatten()
             .ok_or(TriggerError::NotFound)?;
+        let run_id = self.reserve_interactive(&conv.id)?;
+        let me = self.clone();
+        let id = run_id.clone();
+        let text = text.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = me
+                .execute_chat(&id, &conv, &text, &ChatSpec::default())
+                .await
+            {
+                tracing::error!("conversation run {id} failed: {e:#}");
+            }
+            me.finish_active(&id);
+        });
+        Ok(run_id)
+    }
+
+    /// One-shot, tool-less request recorded as its own conversation (visible in the console).
+    /// Waits for the answer and returns its text.
+    pub async fn complete(
+        self: &Arc<Self>,
+        kind: &str,
+        title: &str,
+        spec: ChatSpec,
+        text: &str,
+    ) -> Result<String> {
+        let state = self.state.upgrade().context("daemon shutting down")?;
+        let conv_id = format!("c_{}", uuid::Uuid::new_v4().simple());
+        store::create_conversation(&state.db, &conv_id, title, kind, None).await?;
+        let conv = store::get_conversation(&state.db, &conv_id)
+            .await?
+            .context("conversation just created")?;
+        let run_id = self
+            .reserve_interactive(&conv_id)
+            .map_err(|_| anyhow!("当前进行中的对话已达上限，请稍后再试"))?;
+        let result = self.execute_chat(&run_id, &conv, text, &spec).await;
+        self.finish_active(&run_id);
+        result?;
+        let (run, steps) = store::get_run(&state.db, &run_id)
+            .await?
+            .context("run just finished")?;
+        if run.status != "succeeded" {
+            bail!("{}", run.error.unwrap_or_else(|| "生成失败".into()));
+        }
+        steps
+            .iter()
+            .rev()
+            .find(|s| s.kind == "message")
+            .and_then(|s| s.text.clone())
+            .context("模型没有返回内容")
+    }
+
+    fn reserve_interactive(&self, conversation: &str) -> Result<String, TriggerError> {
         let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
         {
             let mut active = lock(&self.active);
-            if let Some((id, _)) = active.iter().find(|(_, a)| a.conversation == conv.id) {
+            if let Some((id, _)) = active.iter().find(|(_, a)| a.conversation == conversation) {
                 return Err(TriggerError::Busy(id.clone()));
             }
             let busy: Vec<&String> = active
@@ -450,19 +580,10 @@ impl AgentManager {
                 run_id.clone(),
                 Active {
                     lane: Lane::Interactive,
-                    conversation: conv.id.clone(),
+                    conversation: conversation.to_string(),
                 },
             );
         }
-        let me = self.clone();
-        let id = run_id.clone();
-        let text = text.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = me.execute_chat(&id, &conv, &text).await {
-                tracing::error!("conversation run {id} failed: {e:#}");
-            }
-            me.finish_active(&id);
-        });
         Ok(run_id)
     }
 
@@ -522,15 +643,15 @@ impl AgentManager {
         Ok(())
     }
 
-    async fn execute(
-        self: &Arc<Self>,
-        run_id: &str,
-        kind: ReportKind,
-        trigger: &str,
-    ) -> Result<()> {
+    async fn execute(self: &Arc<Self>, run_id: &str, job: &Job, trigger: &str) -> Result<()> {
         let state = self.state.upgrade().context("daemon shutting down")?;
-        let reason = self.unavailable(&state, kind.as_str()).await;
-        let profile = self.profile(&state, kind.as_str());
+        let kind = job.kind();
+        let task = match job {
+            Job::Task(t) => Some(t),
+            Job::Report(_) => None,
+        };
+        let reason = self.unavailable(&state, job.route(), false).await;
+        let profile = self.profile(&state, job.route());
         let model = if reason.is_none() {
             profile.as_ref().map(|p| p.model.clone())
         } else {
@@ -544,10 +665,15 @@ impl AgentManager {
         let conv = format!("c_{run_id}");
         let title = format!(
             "{} · {}",
-            kind.label(),
+            task.map_or(kind.label(), |t| t.name.as_str()),
             chrono::Local::now().format("%Y-%m-%d %H:%M")
         );
-        store::create_conversation(&state.db, &conv, &title, kind.as_str(), None).await?;
+        // configured tasks show under their routing kind (security_check, log_scan, ...)
+        let conv_kind = match task {
+            Some(t) if t.route != "default" => t.route.as_str(),
+            _ => kind.as_str(),
+        };
+        store::create_conversation(&state.db, &conv, &title, conv_kind, None).await?;
         store::insert_run(
             &state.db,
             &store::NewRun {
@@ -574,7 +700,7 @@ impl AgentManager {
                     "run_id": run_id,
                     "mode": "structured",
                     "system": prompt::SYSTEM,
-                    "prompt": prompt::user_prompt(&state, kind, trigger).await?,
+                    "prompt": prompt::user_prompt(&state, kind, trigger, task.map(|t| t.prompt.as_str())).await?,
                     "model": model_spec(&p),
                     "max_steps": state.cfg.ai.max_steps,
                     "tools": tools::definitions(),
@@ -596,7 +722,7 @@ impl AgentManager {
         match outcome {
             Ok(diag) => {
                 let report = self
-                    .save_report(&state, kind, &diag, "ai", model.as_deref(), run_id)
+                    .save_report(&state, kind, task, &diag, "ai", model.as_deref(), run_id)
                     .await?;
                 self.finish(&state, run_id, &conv, "succeeded", None, Some(report))
                     .await?;
@@ -624,7 +750,7 @@ impl AgentManager {
                 } else {
                     let diag = crate::rules::fallback_diagnosis(&state, kind).await?;
                     let report = self
-                        .save_report(&state, kind, &diag, "rules", None, run_id)
+                        .save_report(&state, kind, task, &diag, "rules", None, run_id)
                         .await?;
                     self.finish(&state, run_id, &conv, "fallback", Some(&msg), Some(report))
                         .await?;
@@ -639,10 +765,11 @@ impl AgentManager {
         run_id: &str,
         conv: &crate::model::Conversation,
         text: &str,
+        spec: &ChatSpec,
     ) -> Result<()> {
         let state = self.state.upgrade().context("daemon shutting down")?;
-        let reason = self.unavailable(&state, "chat").await;
-        let profile = self.profile(&state, "chat");
+        let reason = self.unavailable(&state, &spec.route, true).await;
+        let profile = self.profile(&state, &spec.route);
         let model = profile
             .as_ref()
             .filter(|_| reason.is_none())
@@ -696,11 +823,14 @@ impl AgentManager {
             "type": "run",
             "run_id": run_id,
             "mode": "chat",
-            "system": prompt::chat_system(&state, conv).await,
+            "system": match &spec.system {
+                Some(s) => s.clone(),
+                None => prompt::chat_system(&state, conv).await,
+            },
             "messages": prompt::normalize_turns(messages),
             "model": model_spec(&p),
             "max_steps": state.cfg.ai.max_steps,
-            "tools": tools::definitions(),
+            "tools": if spec.tools { tools::definitions() } else { Vec::new() },
         });
         match self
             .run_with_timeout(&state, run_id, &conv.id, &mut seq, &msg)
@@ -770,10 +900,12 @@ impl AgentManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn save_report(
         &self,
         state: &Shared,
         kind: ReportKind,
+        task: Option<&TaskSpec>,
         d: &Diagnosis,
         by: &str,
         model: Option<&str>,
@@ -781,7 +913,7 @@ impl AgentManager {
     ) -> Result<i64> {
         let title = format!(
             "{} · {}",
-            kind.label(),
+            task.map_or(kind.label(), |t| t.name.as_str()),
             chrono::Local::now().format("%Y-%m-%d %H:%M")
         );
         let body = serde_json::to_value(d)?;

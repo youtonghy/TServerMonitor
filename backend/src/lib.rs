@@ -15,3 +15,4 @@ pub mod schedule;
 pub mod settings;
 pub mod state;
 pub mod store;
+pub mod tasks;
