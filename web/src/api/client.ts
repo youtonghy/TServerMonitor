@@ -1,7 +1,8 @@
 import type {
   Alert, AgentRun, AgentRunDetail, ContainerInfo, ContainerLogsResponse, DailyErrorCount, DbStatus,
-  Finding, LogCluster, LogRatesResponse, LogSource, MetricsRange, MetricsResponse, PortInfo, Report,
-  ReportKind, ReportSummary, Snapshot, StatusResponse, TriggerResponse,
+  Finding, LogCluster, LogRatesResponse, LogSource, MetricsRange, MetricsResponse, ModelsRequest, PortInfo,
+  ProviderInput, ProvidersResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
+  StatusResponse, TriggerResponse,
 } from "./types";
 
 export const MOCK = import.meta.env.VITE_MOCK === "1";
@@ -116,7 +117,16 @@ export interface Api {
   agentRuns(limit?: number): Promise<AgentRun[]>;
   agentRun(id: string): Promise<AgentRunDetail>;
   trigger(kind: ReportKind): Promise<TriggerResponse>;
+  providers(): Promise<ProvidersResponse>;
+  createProvider(input: ProviderInput): Promise<{ id: string }>;
+  updateProvider(id: string, input: ProviderInput): Promise<{ id: string }>;
+  deleteProvider(id: string): Promise<{ ok: true }>;
+  listModels(req: ModelsRequest): Promise<{ models: string[] }>;
+  routing(): Promise<RoutingResponse>;
+  saveRouting(routes: Route[]): Promise<RoutingResponse>;
 }
+
+const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
 
 const httpApi: Api = {
   status: () => request("/status"),
@@ -138,6 +148,13 @@ const httpApi: Api = {
   agentRuns: (limit = 50) => request(`/agent/runs${query({ limit })}`),
   agentRun: id => request(`/agent/runs/${encodeURIComponent(id)}`),
   trigger: kind => request("/agent/trigger", { method: "POST", body: JSON.stringify({ kind }) }),
+  providers: () => request("/settings/providers"),
+  createProvider: input => request("/settings/providers", json("POST", input)),
+  updateProvider: (id, input) => request(`/settings/providers/${encodeURIComponent(id)}`, json("PATCH", input)),
+  deleteProvider: id => request(`/settings/providers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  listModels: req => request("/settings/models", json("POST", req)),
+  routing: () => request("/settings/routing"),
+  saveRouting: routes => request("/settings/routing", json("PUT", { routes })),
 };
 
 /**

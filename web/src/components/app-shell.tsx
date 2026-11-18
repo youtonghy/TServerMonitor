@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Activity, Bot, Boxes, FileText, KeyRound, LayoutDashboard, ScrollText, ShieldCheck, TrendingUp, type LucideIcon } from "lucide-react";
+import { Activity, Bot, Boxes, FileText, KeyRound, LayoutDashboard, ScrollText, Settings, ShieldCheck, TrendingUp, type LucideIcon } from "lucide-react";
 import { Badge } from "@/components/arc/badge/badge";
 import { Button } from "@/components/arc/button/button";
 import { ThemeSwitch } from "@/components/arc/theme-switch/theme-switch";
@@ -21,6 +21,7 @@ export const NAV: NavItem[] = [
   { to: "/security", label: "安全", icon: ShieldCheck, match: "security" },
   { to: "/reports", label: "报告", icon: FileText, match: "reports" },
   { to: "/agent", label: "Agent", icon: Bot, match: "agent" },
+  { to: "/settings", label: "设置", icon: Settings, match: "settings" },
 ];
 
 const connectionLabel: Record<ConnectionState, string> = { connecting: "正在连接", open: "实时数据已连接", closed: "实时数据已断开" };

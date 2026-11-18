@@ -1,0 +1,21 @@
+.form { display: grid; gap: 16px; }
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+
+.providerRow { grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+.providerMain { display: grid; gap: 6px; min-width: 0; }
+.badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.rowActions { display: flex; gap: 8px; }
+
+.modelRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+
+.routeRow {
+  grid-template-columns: minmax(140px, 1.1fr) minmax(160px, 1fr) minmax(160px, 1.2fr) minmax(120px, 0.8fr);
+  align-items: end;
+  column-gap: 12px;
+}
+.routeLabel { display: grid; gap: 4px; min-width: 0; align-self: center; }
+
+@media (max-width: 900px) {
+  .routeRow { grid-template-columns: minmax(0, 1fr); }
+  .providerRow { grid-template-columns: minmax(0, 1fr); }
+}

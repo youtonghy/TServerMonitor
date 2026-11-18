@@ -6,6 +6,7 @@ import type {
   Diagnosis, Finding, HostMetrics, LogCluster, LogRatesResponse, LogSource, MetricPoint, MetricsRange, ModeState,
   PortInfo, Report, ReportKind, ReportSummary, Snapshot, StreamEventMap, StreamEventName,
 } from "./types";
+import type { Provider, ResolvedModel, Route, RoutingResponse } from "./types";
 
 const GiB = 1024 ** 3;
 const MiB = 1024 ** 2;
@@ -529,6 +530,38 @@ function simulateRun(kind: ReportKind): string {
   return id;
 }
 
+// Settings
+
+const providers: Provider[] = [
+  { id: "p1a2b3c4d", name: "OpenAI 中转", source: "db", api_format: "responses", base_url: "https://relay.example.com/v1", auth: "api_key", default_model: "gpt-5.2", has_key: true, updated_at: BOOT - DAY },
+  { id: "default", name: "default", source: "config", api_format: "messages", base_url: "https://api.anthropic.com/v1", auth: "api_key", default_model: "claude-sonnet-5-5", has_key: true, key_env: "TSM_LLM_API_KEY", updated_at: null },
+];
+let routes: Route[] = [
+  { kind: "default", provider: "default", model: "", effort: "" },
+  { kind: "chat", provider: "p1a2b3c4d", model: "gpt-5.2", effort: "low" },
+  { kind: "daily", provider: "default", model: "", effort: "high" },
+];
+const TASK_KINDS: [string, string][] = [
+  ["default", "默认"], ["hourly", "小时巡检"], ["daily", "每日运维简报"], ["incident", "异常事件分析"], ["audit", "深度审计"],
+  ["chat", "对话"], ["log_scan", "日志扫描"], ["security_check", "安全体检"], ["package_advice", "包更新建议"], ["prompt_gen", "提示词生成"],
+];
+
+function resolve(kind: string): ResolvedModel | null {
+  const route = routes.find(r => r.kind === kind) ?? routes.find(r => r.kind === "default");
+  const provider = route && providers.find(p => p.id === route.provider);
+  if (!route || !provider) return null;
+  const model = route.model || provider.default_model;
+  return model ? { provider: provider.id, source: provider.source, api_format: provider.api_format, base_url: provider.base_url, model, auth: provider.auth, effort: route.effort } : null;
+}
+
+function routing(): RoutingResponse {
+  return {
+    kinds: TASK_KINDS.map(([kind, label]) => ({ kind, label, resolved: resolve(kind) })),
+    efforts: ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    routes: routes.map(r => ({ ...r })),
+  };
+}
+
 // API
 
 function snapshot(): Snapshot {
@@ -601,5 +634,41 @@ export const mockApi: Api = {
   trigger: kind => {
     if (ai.running) return new Promise((_, reject) => setTimeout(() => reject(new ApiError(409, "a run is already in progress")), 300));
     return delay({ run_id: simulateRun(kind) });
+  },
+  providers: () => delay({ providers: providers.map(p => ({ ...p })), key_storage: "file" as const }),
+  createProvider: input => {
+    if (!input.name?.trim() || !input.base_url?.trim()) return Promise.reject(new ApiError(400, "名称和 base_url 不能为空"));
+    const id = `p${Math.random().toString(16).slice(2, 10)}`;
+    providers.unshift({
+      id, name: input.name.trim(), source: "db", api_format: input.api_format ?? "responses", base_url: input.base_url.trim(),
+      auth: input.auth ?? "api_key", default_model: input.default_model ?? "", has_key: Boolean(input.api_key), updated_at: Date.now(),
+    });
+    return delay({ id });
+  },
+  updateProvider: (id, input) => {
+    const p = providers.find(x => x.id === id && x.source === "db");
+    if (!p) return Promise.reject(new ApiError(404, "provider not found"));
+    if (input.base_url && input.base_url !== p.base_url && p.has_key && input.api_key === undefined) {
+      return Promise.reject(new ApiError(400, "修改 base_url 时必须重新填写密钥"));
+    }
+    const { api_key, ...rest } = input;
+    Object.assign(p, rest, { updated_at: Date.now() });
+    if (api_key !== undefined) p.has_key = api_key !== "";
+    return delay({ id });
+  },
+  deleteProvider: id => {
+    const index = providers.findIndex(x => x.id === id && x.source === "db");
+    if (index < 0) return Promise.reject(new ApiError(404, "provider not found"));
+    providers.splice(index, 1);
+    routes = routes.filter(r => r.provider !== id);
+    return delay({ ok: true as const });
+  },
+  listModels: req => req.base_url?.includes("fail")
+    ? Promise.reject(new ApiError(400, "模型列表接口返回 HTTP 404"))
+    : delay({ models: req.api_format === "messages" ? ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"] : ["gpt-5.2", "gpt-5.2-mini", "o4"] }, 600),
+  routing: () => delay(routing()),
+  saveRouting: next => {
+    routes = next.map(r => ({ ...r }));
+    return delay(routing());
   },
 };

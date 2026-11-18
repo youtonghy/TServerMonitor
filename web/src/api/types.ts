@@ -146,6 +146,40 @@ export interface DbStatus {
 
 export interface TriggerResponse { run_id: string }
 
+// Settings
+
+export type ApiFormat = "responses" | "messages";
+export type AuthStyle = "api_key" | "bearer";
+export type Effort = "" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type KeyStorage = "env" | "file" | "unavailable";
+
+export interface Provider {
+  id: string; name: string;
+  /** "db" providers are editable; "config" ones come from config.toml. */
+  source: "db" | "config";
+  api_format: ApiFormat; base_url: string; auth: AuthStyle; default_model: string;
+  has_key: boolean; key_env?: string; updated_at: number | null;
+}
+export interface ProvidersResponse { providers: Provider[]; key_storage: KeyStorage }
+
+export interface ProviderInput {
+  name?: string; api_format?: ApiFormat; base_url?: string; auth?: AuthStyle; default_model?: string;
+  /** Write-only; empty string clears the stored key. */
+  api_key?: string;
+}
+
+export interface ModelsRequest {
+  provider_id?: string; api_format?: ApiFormat; base_url?: string; auth?: AuthStyle; api_key?: string;
+}
+
+export interface Route { kind: string; provider: string; model: string; effort: Effort }
+export interface ResolvedModel { provider: string; source: "db" | "config"; api_format: ApiFormat; base_url: string; model: string; auth: AuthStyle; effort: Effort }
+export interface RoutingResponse {
+  kinds: { kind: string; label: string; resolved: ResolvedModel | null }[];
+  efforts: Effort[];
+  routes: Route[];
+}
+
 // SSE events on /api/v1/stream
 
 export type ContainerEventItem = Omit<ContainerInfo, "history">;
@@ -158,5 +192,6 @@ export interface StreamEventMap {
   mode: ModeState;
   agent: AgentEvent;
   report: ReportSummary;
+  settings: { generation: number };
 }
 export type StreamEventName = keyof StreamEventMap;

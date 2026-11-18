@@ -13,6 +13,7 @@ const pages: Record<string, ComponentType> = {
   security: lazy(() => import('@/pages/security')),
   reports: lazy(() => import('@/pages/reports')),
   agent: lazy(() => import('@/pages/agent')),
+  settings: lazy(() => import('@/pages/settings')),
 }
 
 function Router() {
