@@ -6,7 +6,7 @@ import type {
   Diagnosis, Finding, HostMetrics, LogCluster, LogRatesResponse, LogSource, MetricPoint, MetricsRange, ModeState,
   PortInfo, Report, ReportKind, ReportSummary, Snapshot, StreamEventMap, StreamEventName,
 } from "./types";
-import type { Provider, ResolvedModel, Route, RoutingResponse } from "./types";
+import type { Conversation, ConversationDetail, Provider, ResolvedModel, Route, RoutingResponse } from "./types";
 
 const GiB = 1024 ** 3;
 const MiB = 1024 ** 2;
@@ -454,7 +454,7 @@ const runs: RunRecord[] = (() => {
   const make = (id: string, trigger: string, kind: ReportKind, status: AgentRun["status"], startedAgo: number, durationMs: number, report: number | null, model: string | null, error: string | null): RunRecord => {
     const started = now - startedAgo;
     const steps = status === "fallback" ? [] : stepsFor(id, started, kind, status === "failed");
-    return { run: { id, trigger, kind, status, started_at: started, finished_at: started + durationMs, model, steps_count: steps.length, error, report_id: report }, steps };
+    return { run: { id, trigger, kind, status, started_at: started, finished_at: started + durationMs, model, steps_count: steps.length, error, report_id: report, conversation_id: `c_${id}` }, steps };
   };
   return [
     make("run_0c41", "alert", "incident", "succeeded", 13 * MIN, 52_000, 57, "gpt-4.1-mini", null),
@@ -501,17 +501,17 @@ export function startMockStream(onEvent: Emit): () => void {
 function simulateRun(kind: ReportKind): string {
   const id = `run_${Math.floor(Date.now() / 1000).toString(16).slice(-4)}`;
   const started = Date.now();
-  const record: RunRecord = { run: { id, trigger: "manual", kind, status: "running", started_at: started, finished_at: null, model: ai.model, steps_count: 0, error: null, report_id: null }, steps: [] };
+  const record: RunRecord = { run: { id, trigger: "manual", kind, status: "running", started_at: started, finished_at: null, model: ai.model, steps_count: 0, error: null, report_id: null, conversation_id: `c_${id}` }, steps: [] };
   runs.unshift(record);
   ai.running = id;
   const planned = stepsFor(id, started, kind);
-  emit("agent", { run_id: id, status: "running", step: null });
+  emit("agent", { run_id: id, conversation_id: `c_${id}`, status: "running", step: null });
   planned.forEach((step, index) => {
     setTimeout(() => {
       const live = { ...step, ts: Date.now() };
       record.steps.push(live);
       record.run.steps_count = record.steps.length;
-      emit("agent", { run_id: id, status: "running", step: live });
+      emit("agent", { run_id: id, conversation_id: `c_${id}`, status: "running", step: live });
       if (index === planned.length - 1) {
         setTimeout(() => {
           const reportId = Math.max(...reportSummaries.map(r => r.id)) + 1;
@@ -521,7 +521,7 @@ function simulateRun(kind: ReportKind): string {
           Object.assign(record.run, { status: "succeeded", finished_at: Date.now(), report_id: reportId });
           ai.running = null;
           ai.runs_today += 1;
-          emit("agent", { run_id: id, status: "succeeded", step: null });
+          emit("agent", { run_id: id, conversation_id: `c_${id}`, status: "succeeded", step: null });
           emit("report", summary);
         }, 1500);
       }
@@ -560,6 +560,91 @@ function routing(): RoutingResponse {
     efforts: ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
     routes: routes.map(r => ({ ...r })),
   };
+}
+
+// Conversations
+
+interface ChatMeta { id: string; title: string; context: Conversation["context"]; created_at: number }
+const chats: ChatMeta[] = [
+  { id: "c_chat1", title: "php-fpm 为什么频繁重启", context: null, created_at: Date.now() - 2 * HOUR },
+];
+(() => {
+  const started = Date.now() - 2 * HOUR + 5_000;
+  const id = "run_chat1";
+  runs.push({
+    run: { id, trigger: "user", kind: "chat", status: "succeeded", started_at: started, finished_at: started + 21_000, model: "gpt-5.2", steps_count: 4, error: null, report_id: null, conversation_id: "c_chat1" },
+    steps: [
+      { seq: 1, ts: started, kind: "user", tool: null, input: null, output: null, text: "php-fpm 为什么频繁重启？" },
+      { seq: 2, ts: started + 4_000, kind: "tool_call", tool: "list_containers", input: {}, output: null, text: null },
+      { seq: 3, ts: started + 4_300, kind: "tool_result", tool: "list_containers", input: null, output: { containers: [{ name: "php-fpm", restart_count: 14, oom_killed: true }] }, text: null },
+      { seq: 4, ts: started + 21_000, kind: "message", tool: null, input: null, output: null, text: "php-fpm 在过去 6 小时重启了 14 次，最近一次是 OOM：容器内存上限 512 MiB，而 pm.max_children = 32、单进程峰值约 40 MiB。\n\n建议：\n1. 把 pm.max_children 调到 10 左右，或把内存上限提高到 1.5 GiB；\n2. 打开 slowlog 定位占内存的请求。" },
+    ],
+  });
+})();
+
+function conversationList(kind: "chat" | "task" | ""): Conversation[] {
+  const byConv = new Map<string, RunRecord[]>();
+  for (const r of runs) {
+    const cid = r.run.conversation_id ?? `c_${r.run.id}`;
+    byConv.set(cid, [...(byConv.get(cid) ?? []), r]);
+  }
+  const list: Conversation[] = [];
+  for (const chat of chats) {
+    const rs = (byConv.get(chat.id) ?? []).sort((a, b) => a.run.started_at - b.run.started_at);
+    const last = rs.at(-1);
+    list.push({ id: chat.id, title: chat.title, kind: "chat", context: chat.context, created_at: chat.created_at, updated_at: last?.run.started_at ?? chat.created_at, last_status: last?.run.status ?? null, runs: rs.length });
+    byConv.delete(chat.id);
+  }
+  for (const [cid, rs] of byConv) {
+    const run = rs[0].run;
+    list.push({ id: cid, title: `${run.kind === "chat" ? "对话" : reportTitle(run.kind)} · ${new Date(run.started_at).toLocaleString("zh-CN", { hour12: false })}`, kind: run.kind, context: null, created_at: run.started_at, updated_at: run.finished_at ?? run.started_at, last_status: run.status, runs: rs.length });
+  }
+  return list
+    .filter(c => !kind || (kind === "chat" ? c.kind === "chat" : c.kind !== "chat"))
+    .sort((a, b) => b.updated_at - a.updated_at);
+}
+
+function reportTitle(kind: string): string {
+  return ({ hourly: "小时巡检", daily: "每日运维简报", incident: "异常事件分析", audit: "深度审计" } as Record<string, string>)[kind] ?? kind;
+}
+
+function conversationDetail(id: string): ConversationDetail | null {
+  const conv = conversationList("").find(c => c.id === id);
+  if (!conv) return null;
+  const rs = runs.filter(r => (r.run.conversation_id ?? `c_${r.run.id}`) === id).sort((a, b) => a.run.started_at - b.run.started_at);
+  return { ...conv, runs: rs.map(r => ({ ...r.run, steps: r.steps.map(s => ({ ...s })) })) };
+}
+
+const ANSWER = "根据最近一小时的数据：CPU 平均 41%，内存 68%，没有持续超过阈值的指标。\n\n值得注意的是 php-error 日志的错误率是基线的 8 倍，主要模板是 `PDOException: SQLSTATE[HY000] [2002]`，说明应用连不上数据库。建议先检查 mysql 容器状态和连接数上限。";
+
+function simulateChat(conversationId: string, text: string): string {
+  const id = `run_${Math.random().toString(16).slice(2, 8)}`;
+  const started = Date.now();
+  const record: RunRecord = { run: { id, trigger: "user", kind: "chat", status: "running", started_at: started, finished_at: null, model: "gpt-5.2", steps_count: 1, error: null, report_id: null, conversation_id: conversationId }, steps: [] };
+  const step = (kind: "user" | "tool_call" | "tool_result" | "message", extra: Partial<{ tool: string; input: unknown; output: unknown; text: string }>) => {
+    const s = { seq: record.steps.length + 1, ts: Date.now(), kind, tool: extra.tool ?? null, input: extra.input ?? null, output: extra.output ?? null, text: extra.text ?? null };
+    record.steps.push(s);
+    record.run.steps_count = record.steps.length;
+    emit("agent", { run_id: id, conversation_id: conversationId, status: "running", step: s });
+  };
+  runs.push(record);
+  const chat = chats.find(c => c.id === conversationId);
+  if (chat && chat.title === "新对话") chat.title = text.slice(0, 30);
+  step("user", { text });
+  setTimeout(() => step("tool_call", { tool: "get_host_metrics", input: { range: "1h" } }), 600);
+  setTimeout(() => step("tool_result", { tool: "get_host_metrics", output: { cpu_avg: 41.2, mem_avg: 68.4 } }), 900);
+  const parts = ANSWER.match(/.{1,6}/gsu) ?? [ANSWER];
+  parts.forEach((part, i) => setTimeout(() => {
+    if (record.run.status !== "running") return;
+    emit("agent_delta", { run_id: id, conversation_id: conversationId, text: part });
+  }, 1200 + i * 60));
+  setTimeout(() => {
+    if (record.run.status !== "running") return;
+    step("message", { text: ANSWER });
+    Object.assign(record.run, { status: "succeeded", finished_at: Date.now() });
+    emit("agent", { run_id: id, conversation_id: conversationId, status: "succeeded", step: null });
+  }, 1400 + parts.length * 60);
+  return id;
 }
 
 // API
@@ -667,6 +752,35 @@ export const mockApi: Api = {
     ? Promise.reject(new ApiError(400, "模型列表接口返回 HTTP 404"))
     : delay({ models: req.api_format === "messages" ? ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"] : ["gpt-5.2", "gpt-5.2-mini", "o4"] }, 600),
   routing: () => delay(routing()),
+  conversations: (kind = "", limit = 100) => delay(conversationList(kind).slice(0, limit)),
+  conversation: id => {
+    const found = conversationDetail(id);
+    return found ? delay(found) : Promise.reject(new ApiError(404, "conversation not found"));
+  },
+  createConversation: input => {
+    const id = `c_${Math.random().toString(16).slice(2, 10)}`;
+    chats.unshift({ id, title: input.title || "新对话", context: input.context ?? null, created_at: Date.now() });
+    return delay({ id, run_id: input.message ? simulateChat(id, input.message) : null });
+  },
+  sendMessage: (id, text) => {
+    if (runs.some(r => r.run.conversation_id === id && r.run.status === "running")) return Promise.reject(new ApiError(409, "a run is already in progress"));
+    if (!conversationDetail(id)) return Promise.reject(new ApiError(404, "conversation not found"));
+    return delay({ run_id: simulateChat(id, text) }, 150);
+  },
+  deleteConversation: id => {
+    const index = chats.findIndex(c => c.id === id);
+    if (index < 0) return Promise.reject(new ApiError(400, "只能删除手动发起的对话"));
+    chats.splice(index, 1);
+    for (let i = runs.length - 1; i >= 0; i--) if (runs[i].run.conversation_id === id) runs.splice(i, 1);
+    return delay({ ok: true as const });
+  },
+  cancelRun: runId => {
+    const r = runs.find(x => x.run.id === runId && x.run.status === "running");
+    if (!r) return Promise.reject(new ApiError(404, "running run not found"));
+    Object.assign(r.run, { status: "cancelled", finished_at: Date.now(), error: "已取消" });
+    emit("agent", { run_id: runId, conversation_id: r.run.conversation_id, status: "cancelled", step: null });
+    return delay({ ok: true as const });
+  },
   saveRouting: next => {
     routes = next.map(r => ({ ...r }));
     return delay(routing());

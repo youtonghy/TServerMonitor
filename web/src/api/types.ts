@@ -103,18 +103,33 @@ export interface ReportSummary {
 }
 export interface Report extends ReportSummary { body: Diagnosis }
 
-export type AgentRunStatus = "running" | "succeeded" | "failed" | "fallback";
+export type AgentRunStatus = "running" | "succeeded" | "failed" | "fallback" | "cancelled";
+/** Report kinds for scheduled analyses, "chat" for a conversation turn. */
+export type RunKind = ReportKind | "chat";
 export interface AgentRun {
-  id: string; trigger: string; kind: ReportKind;
+  id: string; trigger: string; kind: RunKind;
   status: AgentRunStatus;
   started_at: number; finished_at: number | null; model: string | null;
   steps_count: number; error: string | null; report_id: number | null;
+  conversation_id: string | null;
 }
 export interface AgentStep {
-  seq: number; ts: number; kind: "tool_call" | "tool_result" | "message" | "error";
+  seq: number; ts: number; kind: "user" | "tool_call" | "tool_result" | "message" | "error";
   tool: string | null; input: unknown | null; output: unknown | null; text: string | null;
 }
 export type AgentRunDetail = AgentRun & { steps: AgentStep[] };
+
+export type ConversationContext = { report_id: number } | { alert_id: number } | { run_id: string } | { text: string };
+export interface Conversation {
+  id: string; title: string;
+  /** "chat" for user conversations, otherwise the kind of the scheduled run that created it. */
+  kind: RunKind;
+  context: ConversationContext | null;
+  created_at: number; updated_at: number;
+  last_status: AgentRunStatus | null; runs: number;
+}
+export type ConversationDetail = Omit<Conversation, "runs"> & { runs: AgentRunDetail[] };
+export interface NewConversation { title?: string; context?: ConversationContext; message?: string }
 
 // Endpoint payloads
 
@@ -183,7 +198,8 @@ export interface RoutingResponse {
 // SSE events on /api/v1/stream
 
 export type ContainerEventItem = Omit<ContainerInfo, "history">;
-export interface AgentEvent { run_id: string; status: AgentRunStatus; step: AgentStep | null }
+export interface AgentEvent { run_id: string; conversation_id: string | null; status: AgentRunStatus; step: AgentStep | null }
+export interface AgentDeltaEvent { run_id: string; conversation_id: string; text: string }
 
 export interface StreamEventMap {
   metrics: HostMetrics;
@@ -191,6 +207,7 @@ export interface StreamEventMap {
   alert: Alert;
   mode: ModeState;
   agent: AgentEvent;
+  agent_delta: AgentDeltaEvent;
   report: ReportSummary;
   settings: { generation: number };
 }

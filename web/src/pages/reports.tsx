@@ -14,7 +14,7 @@ import {
   categoryLabel, confidenceLabel, confidenceTone, dimensionLabel, findingSeverityLabel, findingSeverityTone, generatedByLabel,
   priorityLabel, priorityTone, reportKindLabel, severityLabel, severityTone,
 } from "@/lib/labels";
-import { Link, useRoute } from "@/lib/router";
+import { Link, navigate, useRoute } from "@/lib/router";
 import styles from "./pages.module.css";
 
 const KINDS: { value: ReportKind | "all"; label: string }[] = [
@@ -134,11 +134,34 @@ function ReportList({ reports, selectedId, now }: { reports: ReportSummary[]; se
   );
 }
 
+/** Opens a conversation about this report in the Agent console. */
+function AskAgent({ reportId, title }: { reportId: number; title?: string }) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const ask = async () => {
+    setBusy(true);
+    setFailed(null);
+    try {
+      const { id } = await api.createConversation({ title: `追问：${title ?? `报告 #${reportId}`}`, context: { report_id: reportId } });
+      navigate(`/agent/${id}`);
+    } catch (error) {
+      setFailed(errorMessage(error instanceof Error ? error : new Error(String(error))));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Button size="sm" variant="secondary" onClick={ask} loading={busy} title={failed ?? undefined}>
+      {failed ? "无法创建对话" : "向 Agent 追问"}
+    </Button>
+  );
+}
+
 function ReportDetail({ id }: { id: number }) {
   const report = useQuery(() => api.report(id), [id]);
   return (
     <div className={styles.stack}>
-      <Section title="报告摘要" query={report} skeletonLines={6} errorTitle="报告加载失败">
+      <Section title="报告摘要" query={report} skeletonLines={6} errorTitle="报告加载失败" actions={<AskAgent reportId={id} title={report.data?.title} />}>
         {data => <Summary report={data} />}
       </Section>
       {report.status === "ready" && <Diagnoses body={report.data.body} />}

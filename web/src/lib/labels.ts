@@ -47,14 +47,20 @@ export const reportKindLabel: Record<ReportKind, string> = {
 };
 
 export const runStatusLabel: Record<AgentRunStatus, string> = {
-  running: "运行中", succeeded: "成功", failed: "失败", fallback: "规则兜底",
+  running: "运行中", succeeded: "成功", failed: "失败", fallback: "规则兜底", cancelled: "已取消",
 };
 export const runStatusTone: Record<AgentRunStatus, BadgeTone> = {
-  running: "info", succeeded: "success", failed: "danger", fallback: "warning",
+  running: "info", succeeded: "success", failed: "danger", fallback: "warning", cancelled: "neutral",
 };
 
 export const stepKindLabel: Record<AgentStep["kind"], string> = {
-  tool_call: "工具调用", tool_result: "工具结果", message: "消息", error: "错误",
+  user: "用户", tool_call: "工具调用", tool_result: "工具结果", message: "消息", error: "错误",
+};
+
+/** Run / conversation kinds: report kinds, chat, and scheduled task kinds. */
+export const taskKindLabel: Record<string, string> = {
+  hourly: "小时巡检", daily: "每日简报", incident: "事件分析", audit: "深度审计", chat: "对话",
+  log_scan: "日志扫描", security_check: "安全体检", package_advice: "包更新建议", custom: "自定义任务",
 };
 
 export const confidenceLabel: Record<Confidence, string> = { high: "高置信度", medium: "中置信度", low: "低置信度" };

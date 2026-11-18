@@ -1,5 +1,5 @@
 import type {
-  Alert, AgentRun, AgentRunDetail, ContainerInfo, ContainerLogsResponse, DailyErrorCount, DbStatus,
+  Alert, AgentRun, AgentRunDetail, ContainerInfo, Conversation, ConversationDetail, NewConversation, ContainerLogsResponse, DailyErrorCount, DbStatus,
   Finding, LogCluster, LogRatesResponse, LogSource, MetricsRange, MetricsResponse, ModelsRequest, PortInfo,
   ProviderInput, ProvidersResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
   StatusResponse, TriggerResponse,
@@ -124,6 +124,12 @@ export interface Api {
   listModels(req: ModelsRequest): Promise<{ models: string[] }>;
   routing(): Promise<RoutingResponse>;
   saveRouting(routes: Route[]): Promise<RoutingResponse>;
+  conversations(kind?: "chat" | "task" | "", limit?: number): Promise<Conversation[]>;
+  conversation(id: string): Promise<ConversationDetail>;
+  createConversation(input: NewConversation): Promise<{ id: string; run_id: string | null }>;
+  sendMessage(id: string, text: string): Promise<{ run_id: string }>;
+  deleteConversation(id: string): Promise<{ ok: true }>;
+  cancelRun(runId: string): Promise<{ ok: true }>;
 }
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -155,6 +161,12 @@ const httpApi: Api = {
   listModels: req => request("/settings/models", json("POST", req)),
   routing: () => request("/settings/routing"),
   saveRouting: routes => request("/settings/routing", json("PUT", { routes })),
+  conversations: (kind = "", limit = 100) => request(`/conversations${query({ kind, limit })}`),
+  conversation: id => request(`/conversations/${encodeURIComponent(id)}`),
+  createConversation: input => request("/conversations", json("POST", input)),
+  sendMessage: (id, text) => request(`/conversations/${encodeURIComponent(id)}/messages`, json("POST", { text })),
+  deleteConversation: id => request(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  cancelRun: runId => request(`/agent/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
 };
 
 /**
