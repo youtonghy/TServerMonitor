@@ -12,5 +12,6 @@ pub mod preprocess;
 pub mod rules;
 pub mod sandbox;
 pub mod schedule;
+pub mod settings;
 pub mod state;
 pub mod store;

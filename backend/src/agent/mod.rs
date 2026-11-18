@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! sidecar -> {"type":"ready"}
-//! rust    -> {"type":"run", run_id, system, prompt, model:{format,base_url,model,api_key_env,auth}, max_steps, tools:[...], output_schema}
+//! rust    -> {"type":"run", run_id, system, prompt, model:{format,base_url,model,api_key_env,auth,effort}, max_steps, tools:[...], output_schema}
 //! sidecar -> {"type":"tool_call", run_id, call_id, name, input}
 //! rust    -> {"type":"tool_result", run_id, call_id, output, is_error}
 //! sidecar -> {"type":"step", run_id, text}
@@ -25,9 +25,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use crate::config::{ApiFormat, AuthStyle, ModelProfile, secret};
 use crate::model::{AgentStep, AiStatus, Diagnosis, Event, ReportKind, now_ms};
 use crate::sandbox::Sandbox;
+use crate::settings::{ResolvedModel, auth_str, format_str};
 use crate::state::{AppState, Shared};
 use crate::store;
 
@@ -47,6 +47,8 @@ struct Sidecar {
     stdin: tokio::process::ChildStdin,
     rx: mpsc::Receiver<Value>,
     last_used: Instant,
+    /// Settings generation the environment was built from; a mismatch forces a respawn.
+    generation: u64,
 }
 
 impl Sidecar {
@@ -141,8 +143,6 @@ impl AgentManager {
         let script = materialize_script(state);
         let static_reason = if !cfg.enabled {
             Some("AI 分析已在配置中关闭".to_string())
-        } else if cfg.profiles.is_empty() {
-            Some("未配置模型（缺少 [ai.profiles.default]）".to_string())
         } else if node.is_none() {
             Some(format!(
                 "未找到 Node.js（node_bin = {}），AI 子进程无法启动",
@@ -194,12 +194,8 @@ impl AgentManager {
         }
     }
 
-    fn profile(&self, state: &AppState, kind: ReportKind) -> Option<(String, ModelProfile)> {
-        state
-            .cfg
-            .ai
-            .profile_for(kind.as_str())
-            .map(|(n, p)| (n.to_string(), p.clone()))
+    fn profile(&self, state: &AppState, route: &str) -> Option<ResolvedModel> {
+        state.settings.resolve(route)
     }
 
     async fn runs_today(state: &AppState) -> u32 {
@@ -213,15 +209,19 @@ impl AgentManager {
     }
 
     /// Why a model-backed run is not possible right now (None = possible).
-    async fn unavailable(&self, state: &AppState, kind: ReportKind) -> Option<String> {
+    async fn unavailable(&self, state: &AppState, route: &str) -> Option<String> {
         if let Some(r) = &self.static_reason {
             return Some(r.clone());
         }
-        let Some((_, p)) = self.profile(state, kind) else {
-            return Some("未配置模型".into());
+        let Some(p) = self.profile(state, route) else {
+            return Some("未配置模型：请在设置页添加 Provider 并设置任务路由".into());
         };
-        if secret(&p.api_key_env).is_none() {
-            return Some(format!("环境变量 {} 未设置", p.api_key_env));
+        if !p.has_key {
+            return Some(if p.source == "config" {
+                format!("环境变量 {} 未设置", p.key_env)
+            } else {
+                format!("Provider {} 未填写密钥", p.provider)
+            });
         }
         if Self::runs_today(state).await >= state.cfg.ai.daily_budget {
             return Some(format!(
@@ -236,13 +236,13 @@ impl AgentManager {
         let Some(state) = self.state.upgrade() else {
             return AiStatus::default();
         };
-        let profile = self.profile(&state, ReportKind::Daily);
-        let reason = self.unavailable(&state, ReportKind::Daily).await;
+        let profile = self.profile(&state, "daily");
+        let reason = self.unavailable(&state, "daily").await;
         AiStatus {
             enabled: reason.is_none(),
             reason,
-            format: profile.as_ref().map(|(_, p)| p.api_format),
-            model: profile.map(|(_, p)| p.model),
+            format: profile.as_ref().map(|p| p.api_format),
+            model: profile.map(|p| p.model),
             runs_today: Self::runs_today(&state).await,
             daily_budget: state.cfg.ai.daily_budget,
             running: self
@@ -350,10 +350,10 @@ impl AgentManager {
         trigger: &str,
     ) -> Result<()> {
         let state = self.state.upgrade().context("daemon shutting down")?;
-        let reason = self.unavailable(&state, kind).await;
-        let profile = self.profile(&state, kind);
+        let reason = self.unavailable(&state, kind.as_str()).await;
+        let profile = self.profile(&state, kind.as_str());
         let model = if reason.is_none() {
-            profile.as_ref().map(|(_, p)| p.model.clone())
+            profile.as_ref().map(|p| p.model.clone())
         } else {
             None
         };
@@ -371,7 +371,7 @@ impl AgentManager {
         let mut seq = 0;
 
         let outcome: Result<Diagnosis> = match (&reason, profile) {
-            (None, Some((_, p))) => {
+            (None, Some(p)) => {
                 let timeout = Duration::from_secs(state.cfg.ai.timeout_secs);
                 match tokio::time::timeout(
                     timeout,
@@ -485,8 +485,10 @@ impl AgentManager {
         state: &AppState,
         guard: &'a mut Option<Sidecar>,
     ) -> Result<&'a mut Sidecar> {
-        if guard.as_mut().is_some_and(|s| !s.alive()) {
-            *guard = None;
+        let generation = state.settings.generation();
+        // dead, or started with outdated provider keys
+        if let Some(mut s) = guard.take_if(|s| !s.alive() || s.generation != generation) {
+            let _ = s.child.kill().await;
         }
         if guard.is_none() {
             *guard = Some(self.spawn_sidecar(state).await?);
@@ -519,10 +521,14 @@ impl AgentManager {
             }
         }
         // only the model keys the sidecar needs, nothing else from our environment
+        let generation = state.settings.generation();
         for p in state.cfg.ai.profiles.values() {
-            if let Some(v) = secret(&p.api_key_env) {
+            if let Some(v) = crate::config::secret(&p.api_key_env) {
                 cmd.env(&p.api_key_env, v);
             }
+        }
+        for (env, key) in state.settings.provider_env(&state.db).await {
+            cmd.env(env, key);
         }
         cmd.current_dir(script.parent().unwrap_or(std::path::Path::new("/")))
             .stdin(Stdio::piped())
@@ -569,6 +575,7 @@ impl AgentManager {
             stdin,
             rx,
             last_used: Instant::now(),
+            generation,
         })
     }
 
@@ -578,7 +585,7 @@ impl AgentManager {
         run_id: &str,
         kind: ReportKind,
         trigger: &str,
-        p: &ModelProfile,
+        p: &ResolvedModel,
         seq: &mut i64,
     ) -> Result<Diagnosis> {
         let prompt = prompt::user_prompt(state, kind, trigger).await?;
@@ -591,11 +598,12 @@ impl AgentManager {
             "system": prompt::SYSTEM,
             "prompt": prompt,
             "model": {
-                "format": match p.api_format { ApiFormat::Responses => "responses", ApiFormat::Messages => "messages" },
+                "format": format_str(p.api_format),
                 "base_url": p.base_url,
                 "model": p.model,
-                "api_key_env": p.api_key_env,
-                "auth": match p.auth { AuthStyle::ApiKey => "api_key", AuthStyle::Bearer => "bearer" },
+                "api_key_env": p.key_env,
+                "auth": auth_str(p.auth),
+                "effort": p.effort,
             },
             "max_steps": state.cfg.ai.max_steps,
             "tools": tools::definitions(),

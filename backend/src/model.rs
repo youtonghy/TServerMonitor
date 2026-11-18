@@ -475,6 +475,10 @@ pub enum Event {
         step: Option<AgentStep>,
     },
     Report(ReportSummary),
+    /// Runtime settings changed; carries no secrets.
+    Settings {
+        generation: u64,
+    },
 }
 
 impl Event {
@@ -486,6 +490,7 @@ impl Event {
             Self::Mode(_) => "mode",
             Self::Agent { .. } => "agent",
             Self::Report(_) => "report",
+            Self::Settings { .. } => "settings",
         }
     }
 
@@ -501,6 +506,7 @@ impl Event {
                 step,
             } => Ok(serde_json::json!({ "run_id": run_id, "status": status, "step": step })),
             Self::Report(r) => serde_json::to_value(r),
+            Self::Settings { generation } => Ok(serde_json::json!({ "generation": generation })),
         }
         .unwrap_or(serde_json::Value::Null)
     }

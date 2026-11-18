@@ -12,6 +12,7 @@ use crate::model::{
     ContainerInfo, DbStatus, Event, HostMetrics, LogSourceInfo, Mode, ModeState, PortInfo, now_ms,
 };
 use crate::notify::Notifier;
+use crate::settings::Settings;
 use crate::store::Db;
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,6 +46,7 @@ pub struct AppState {
     pub live: RwLock<Live>,
     pub started_at: i64,
     pub notifier: Notifier,
+    pub settings: Settings,
     agent: OnceLock<Arc<AgentManager>>,
 }
 
@@ -54,6 +56,7 @@ impl AppState {
     pub fn new(cfg: Arc<Config>, db: Db) -> Shared {
         let (events, _) = broadcast::channel(512);
         let notifier = Notifier::new(cfg.clone());
+        let settings = Settings::new(cfg.clone());
         Arc::new(Self {
             cfg,
             db,
@@ -61,6 +64,7 @@ impl AppState {
             live: RwLock::new(Live::default()),
             started_at: now_ms(),
             notifier,
+            settings,
             agent: OnceLock::new(),
         })
     }

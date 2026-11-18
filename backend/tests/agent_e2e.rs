@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use tsmonitor::config::{ApiFormat, AuthStyle, Config, ModelProfile};
 use tsmonitor::model::ReportKind;
-use tsmonitor::{agent, sandbox, state, store};
+use tsmonitor::{agent, sandbox, settings, state, store};
 
 type Log = Arc<Mutex<Vec<Value>>>;
 
@@ -300,6 +300,81 @@ async fn broken_sidecar_falls_back() {
             assert_eq!(r.status, "fallback", "{r:?}");
             assert!(r.error.unwrap_or_default().contains("exited"));
             assert!(steps.iter().any(|s| s.kind == "error"));
+            return;
+        }
+    }
+    panic!("run did not finish");
+}
+
+/// Provider added at runtime (encrypted key in the DB) + routed reasoning effort reach the model.
+#[tokio::test]
+async fn db_provider_with_effort_end_to_end() {
+    if sidecar_path().is_none() {
+        eprintln!("node or built sidecar missing, skipping");
+        return;
+    }
+    let (base_url, log) = fake_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.storage.data_dir = dir.path().to_path_buf();
+    cfg.ai.sidecar_path = sidecar_path();
+    cfg.ai.timeout_secs = 60;
+    let cfg = Arc::new(cfg);
+    let state = state::AppState::new(cfg.clone(), store::open(dir.path()).await.unwrap());
+    state.settings.set_file_key_allowed(true);
+    let sb = Arc::new(sandbox::Sandbox::init(dir.path(), cfg.sandbox.clone()).unwrap());
+    let mgr = agent::AgentManager::init(&state, sb).await;
+    state.set_agent(mgr.clone());
+    assert!(!mgr.status().await.enabled, "no provider yet");
+
+    let id = settings::create_provider(
+        &state.settings,
+        &state.db,
+        settings::ProviderInput {
+            name: Some("ui".into()),
+            api_format: Some(ApiFormat::Responses),
+            base_url: Some(base_url),
+            auth: None,
+            default_model: Some("db-model".into()),
+            api_key: Some("db-secret-key".into()),
+        },
+    )
+    .await
+    .unwrap();
+    settings::replace_routes(
+        &state.settings,
+        &state.db,
+        &[settings::Route {
+            kind: "default".into(),
+            provider: id,
+            model: String::new(),
+            effort: "high".into(),
+        }],
+    )
+    .await
+    .unwrap();
+    let st = mgr.status().await;
+    assert!(st.enabled, "{:?}", st.reason);
+
+    let run_id = mgr.trigger(ReportKind::Daily, "test").unwrap();
+    for _ in 0..300 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some((r, _)) = store::get_run(&state.db, &run_id).await.unwrap()
+            && r.status != "running"
+        {
+            let requests = log.lock().unwrap().clone();
+            assert_eq!(r.status, "succeeded", "{:?} {requests:#?}", r.error);
+            assert_eq!(requests[0]["model"], "db-model");
+            assert_eq!(
+                requests[0]["reasoning"]["effort"], "high",
+                "{:#?}",
+                requests[0]
+            );
+            assert!(
+                !requests
+                    .iter()
+                    .any(|r| r.to_string().contains("db-secret-key"))
+            );
             return;
         }
     }

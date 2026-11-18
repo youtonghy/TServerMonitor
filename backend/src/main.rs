@@ -66,7 +66,18 @@ async fn run(cfg: config::Config) -> Result<()> {
         &cfg.storage.data_dir,
         cfg.sandbox.clone(),
     )?);
-    match sandbox::probe().await.as_str() {
+    let isolation = sandbox::probe().await;
+    // the key file next to the DB is only safe when analysis scripts cannot read the data dir
+    state.settings.set_file_key_allowed(matches!(
+        isolation.as_str(),
+        "fully_enforced" | "partially_enforced"
+    ));
+    state
+        .settings
+        .reload(&state.db)
+        .await
+        .context("loading runtime settings")?;
+    match isolation.as_str() {
         "fully_enforced" => state.set_collector(
             "sandbox",
             true,

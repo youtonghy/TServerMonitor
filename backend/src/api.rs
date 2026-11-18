@@ -1,5 +1,8 @@
-//! HTTP API (read-only except the manual trigger), SSE stream, MCP endpoint and the embedded
-//! dashboard. See `docs/api.md`.
+//! HTTP API, SSE stream, MCP endpoint and the embedded dashboard. See `docs/api.md`.
+//!
+//! Reads (and the legacy manual trigger) use the optional bearer token. Everything that changes
+//! settings or starts interactive work sits in the admin group, which additionally requires the
+//! token to be configured at all and rejects cross-origin browser requests.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -9,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use futures::Stream;
 use serde::Deserialize;
@@ -36,6 +39,9 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(inv) = e.downcast_ref::<crate::settings::Invalid>() {
+            return ApiError(StatusCode::BAD_REQUEST, inv.0.clone());
+        }
         tracing::error!("api error: {e:#}");
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
     }
@@ -80,6 +86,41 @@ async fn auth(State(state): State<Shared>, req: Request, next: Next) -> Response
         Some(t) if ct_eq(t.as_bytes(), expected.as_bytes()) => next.run(req).await,
         _ => ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()).into_response(),
     }
+}
+
+/// Admin routes: a token must be configured, and browsers must not call cross-origin.
+async fn require_admin(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    if crate::config::secret(&state.cfg.server.token_env).is_none() {
+        return ApiError(
+            StatusCode::FORBIDDEN,
+            format!(
+                "写操作需要先设置访问令牌（环境变量 {}）",
+                state.cfg.server.token_env
+            ),
+        )
+        .into_response();
+    }
+    if !same_origin(req.headers()) {
+        return ApiError(StatusCode::FORBIDDEN, "cross-origin request refused".into())
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// True when there is no Origin header (non-browser client) or it matches Host.
+fn same_origin(h: &HeaderMap) -> bool {
+    let Some(origin) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    let host = h.get(header::HOST).and_then(|v| v.to_str().ok());
+    let origin_host = origin
+        .split_once("://")
+        .map(|(_, rest)| rest.trim_end_matches('/'));
+    origin_host.is_some() && origin_host == host
+}
+
+fn bad_request(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
 
 // ---------------------------------------------------------------- snapshot
@@ -429,6 +470,149 @@ async fn post_trigger(
     }
 }
 
+// ---------------------------------------------------------------- settings
+
+fn emit_settings(state: &Shared) {
+    state.emit(crate::model::Event::Settings {
+        generation: state.settings.generation(),
+    });
+}
+
+async fn get_providers(State(state): State<Shared>) -> ApiResult<Value> {
+    let snap = state.settings.snapshot();
+    Ok(Json(json!({
+        "providers": snap.providers,
+        "key_storage": state.settings.key_storage(),
+    })))
+}
+
+async fn post_provider(
+    State(state): State<Shared>,
+    Json(body): Json<crate::settings::ProviderInput>,
+) -> ApiResult<Value> {
+    let id = crate::settings::create_provider(&state.settings, &state.db, body).await?;
+    emit_settings(&state);
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn patch_provider(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Json(body): Json<crate::settings::ProviderInput>,
+) -> ApiResult<Value> {
+    if state.cfg.ai.profiles.contains_key(&id) {
+        return Err(bad_request(
+            "配置文件中的 Provider 只读，请修改 config.toml",
+        ));
+    }
+    if !crate::settings::update_provider(&state.settings, &state.db, &id, body).await? {
+        return Err(not_found("provider"));
+    }
+    emit_settings(&state);
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn delete_provider(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    if state.cfg.ai.profiles.contains_key(&id) {
+        return Err(bad_request(
+            "配置文件中的 Provider 只读，请修改 config.toml",
+        ));
+    }
+    if !crate::settings::delete_provider(&state.settings, &state.db, &id).await? {
+        return Err(not_found("provider"));
+    }
+    emit_settings(&state);
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ModelsBody {
+    /// Saved provider whose stored key (and, unless overridden, URL/format) is used.
+    provider_id: Option<String>,
+    api_format: Option<crate::config::ApiFormat>,
+    base_url: Option<String>,
+    auth: Option<crate::config::AuthStyle>,
+    api_key: Option<String>,
+}
+
+async fn post_models(State(state): State<Shared>, Json(b): Json<ModelsBody>) -> ApiResult<Value> {
+    let saved = match &b.provider_id {
+        Some(id) => Some(
+            state
+                .settings
+                .snapshot()
+                .providers
+                .iter()
+                .find(|p| &p.id == id)
+                .cloned()
+                .ok_or_else(|| not_found("provider"))?,
+        ),
+        None => None,
+    };
+    let format = b
+        .api_format
+        .or(saved.as_ref().map(|p| p.api_format))
+        .ok_or_else(|| bad_request("缺少 api_format"))?;
+    let base_url = b
+        .base_url
+        .clone()
+        .or(saved.as_ref().map(|p| p.base_url.clone()))
+        .ok_or_else(|| bad_request("缺少 base_url"))?;
+    let auth = b
+        .auth
+        .or(saved.as_ref().map(|p| p.auth))
+        .unwrap_or_default();
+    let key = match b
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        Some(k) => Some(k.to_string()),
+        // the stored key only goes to the URL it was saved for
+        None => match &saved {
+            Some(p)
+                if p.base_url.trim_end_matches('/') == base_url.trim().trim_end_matches('/') =>
+            {
+                state.settings.provider_key(&state.db, &p.id).await?
+            }
+            _ => None,
+        },
+    };
+    let models = crate::settings::fetch_models(format, &base_url, auth, key.as_deref()).await?;
+    Ok(Json(json!({ "models": models })))
+}
+
+async fn get_routing(State(state): State<Shared>) -> ApiResult<Value> {
+    let snap = state.settings.snapshot();
+    let kinds: Vec<Value> = crate::settings::TASK_KINDS
+        .iter()
+        .map(|(k, label)| {
+            json!({
+                "kind": k,
+                "label": label,
+                "resolved": state.settings.resolve(k),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "kinds": kinds,
+        "efforts": crate::settings::EFFORTS,
+        "routes": snap.routes.values().collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct RoutingBody {
+    routes: Vec<crate::settings::Route>,
+}
+
+async fn put_routing(State(state): State<Shared>, Json(b): Json<RoutingBody>) -> ApiResult<Value> {
+    crate::settings::replace_routes(&state.settings, &state.db, &b.routes).await?;
+    emit_settings(&state);
+    get_routing(State(state)).await
+}
+
 async fn stream(
     State(state): State<Shared>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
@@ -514,9 +698,25 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/agent/runs/{id}", get(get_run))
         .route("/api/v1/agent/trigger", post(post_trigger))
         .route("/api/v1/stream", get(stream))
-        .nest_service("/mcp", crate::mcp::service(state.clone()))
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth));
-    api.fallback(static_handler).with_state(state)
+        .route("/api/v1/settings/providers", get(get_providers))
+        .route("/api/v1/settings/routing", get(get_routing))
+        .nest_service("/mcp", crate::mcp::service(state.clone()));
+    let admin = Router::new()
+        .route("/api/v1/settings/providers", post(post_provider))
+        .route(
+            "/api/v1/settings/providers/{id}",
+            patch(patch_provider).delete(delete_provider),
+        )
+        .route("/api/v1/settings/models", post(post_models))
+        .route("/api/v1/settings/routing", axum::routing::put(put_routing))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_admin,
+        ));
+    api.merge(admin)
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth))
+        .fallback(static_handler)
+        .with_state(state)
 }
 
 #[cfg(test)]
@@ -524,9 +724,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn origin_check() {
+        let mut h = HeaderMap::new();
+        assert!(same_origin(&h));
+        h.insert(header::HOST, "127.0.0.1:8787".parse().unwrap());
+        h.insert(header::ORIGIN, "http://127.0.0.1:8787".parse().unwrap());
+        assert!(same_origin(&h));
+        h.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        assert!(!same_origin(&h));
+    }
+
+    #[test]
     fn constant_time_eq() {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"abcd"));
+    }
+
+    async fn serve(token_env: &str) -> String {
+        let mut cfg = crate::config::Config::default();
+        cfg.server.token_env = token_env.into();
+        let state = crate::state::AppState::new(
+            std::sync::Arc::new(cfg),
+            crate::store::open_memory().await,
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, router(state)).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn admin_routes_need_configured_token() {
+        let base = serve("TSM_TEST_API_TOKEN_UNSET").await;
+        let c = reqwest::Client::new();
+        // reads stay open when no token is configured
+        let r = c
+            .get(format!("{base}/api/v1/settings/providers"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let r = c
+            .post(format!("{base}/api/v1/settings/providers"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+    }
+
+    #[tokio::test]
+    async fn admin_routes_check_token_and_origin() {
+        // SAFETY: unique variable name for this test.
+        unsafe { std::env::set_var("TSM_TEST_API_TOKEN_SET", "t0k") };
+        let base = serve("TSM_TEST_API_TOKEN_SET").await;
+        let c = reqwest::Client::new();
+        let url = format!("{base}/api/v1/settings/providers");
+        let r = c.post(&url).json(&json!({})).send().await.unwrap();
+        assert_eq!(r.status(), 401);
+        let r = c
+            .post(&url)
+            .bearer_auth("t0k")
+            .header("origin", "https://evil.example")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+        // authorized: reaches validation
+        let r = c
+            .post(&url)
+            .bearer_auth("t0k")
+            .json(&json!({ "name": "x" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
     }
 }

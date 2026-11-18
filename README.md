@@ -34,7 +34,7 @@
 
 ## 安全边界
 
-- **只读**：代码中没有任何写宿主机、重启容器、改配置的调用。Docker 只用 list/inspect/stats/logs/events；数据库只执行内置白名单语句；模型无法传入 SQL 或任意路径。
+- **只读**：代码中没有任何写宿主机、重启容器的调用；界面只能修改本程序自己的运行设置（模型 Provider、任务路由等，存在本地数据库），这类写接口必须配置 `TSM_API_TOKEN` 才可用。Docker 只用 list/inspect/stats/logs/events；数据库只执行内置白名单语句；模型无法传入 SQL 或任意路径。
 - **脱敏**：密码、令牌、API Key、JWT、邮箱、卡号等在入库和进入模型上下文之前就被替换。
 - **AI 子进程**：Node 进程只拿到模型密钥（通过环境变量），没有任何读文件或执行命令的工具；所有工具都在 Rust 侧执行。
 - **沙箱**：AI 写的 Python 脚本只能放在 `<data_dir>/workspace/scripts/`，运行时清空环境变量、限制内存/CPU/文件大小、有超时和输出上限。在 Linux 上额外启用 Landlock：只能读系统运行库、只能写工作区；内核 6.7 及以上还会禁止联网。启动日志和 `/api/v1/status` 会显示实际隔离级别。
@@ -102,12 +102,13 @@ GRANT pg_monitor TO tsm;
 
 ## 配置要点
 
-完整示例见 [`deploy/config.example.toml`](deploy/config.example.toml)。所有密钥只从环境变量读取，配置文件里只写变量名。
+完整示例见 [`deploy/config.example.toml`](deploy/config.example.toml)。配置文件里的密钥只从环境变量读取，配置文件里只写变量名；在“设置”页添加的 Provider 密钥会加密保存在本地数据库中（见下文）。
 
 | 环境变量 | 用途 |
 | --- | --- |
 | `TSM_LLM_API_KEY` | 模型密钥（变量名可在 `api_key_env` 中改） |
-| `TSM_API_TOKEN` | 大屏/API/MCP 访问令牌；非回环监听时必填 |
+| `TSM_API_TOKEN` | 大屏/API/MCP 访问令牌；非回环监听时必填；界面上的所有写操作（设置等）都要求设置它 |
+| `TSM_SECRET_KEY` | 加密界面中填写的模型密钥所用的主密钥（任意长字符串）。未设置时自动生成 `<data_dir>/secret.key`，但仅在 Landlock 能隔离数据目录时允许 |
 | `TSM_TELEGRAM_BOT_TOKEN` | Telegram 机器人令牌 |
 | `TSM_DB_<名称>_DSN` | 数据库只读连接串（变量名在 `dsn_env` 中配置） |
 | `DOCKER_HOST` | Docker 地址（推荐指向只读代理） |
@@ -136,6 +137,13 @@ hourly = "fast"
 ```
 
 如果某个来源不支持结构化输出，子进程会自动改为“让模型输出 JSON 文本再校验”。每天的模型调用次数受 `daily_budget` 限制。
+
+也可以不改配置文件，直接在大屏的“设置”页操作：
+
+- 添加 Provider：选择 Responses 或 Messages 协议，填写接口地址和密钥，点“拉取模型列表”（请求 `{base_url}/models`）后选择模型；拉取不到时手动填写。
+- 任务路由：为默认、小时巡检、日报、事件分析、审计、对话、日志扫描、安全体检、包更新建议、提示词生成分别选择 Provider、模型和思考强度。未单独设置的任务使用“默认”行；数据库里没有任何路由时沿用 `[ai.routing]`。
+- 思考强度会作为推理参数发送；如果中转站返回 400 不认这个参数，会自动去掉后重试一次。
+- 密钥只写不读；修改 Provider 的接口地址时必须重新填写密钥。配置文件中的 Provider 在界面中只读。
 
 ## 对外接口
 

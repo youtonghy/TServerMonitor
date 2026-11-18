@@ -12,7 +12,11 @@ export interface ModelSpec {
   /** Name of the env var that holds the key. The key itself never travels over the protocol. */
   api_key_env: string;
   auth: 'api_key' | 'bearer';
+  /** Reasoning effort; empty or missing = provider default. */
+  effort?: Effort | '';
 }
+
+export type Effort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface ToolDef {
   name: string;

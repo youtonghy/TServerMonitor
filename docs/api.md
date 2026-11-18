@@ -1,6 +1,7 @@
 # TServerMonitor HTTP API
 
-All endpoints are read-only except `POST /api/v1/agent/trigger`. Responses are JSON.
+`GET` endpoints are read-only. Write endpoints are `POST /api/v1/agent/trigger` and the
+**admin** endpoints marked below. Responses are JSON.
 Timestamps are Unix epoch **milliseconds** (`i64`). Byte counts are integers in bytes,
 rates are per second unless the field name says otherwise.
 
@@ -8,6 +9,10 @@ Authentication: when the environment variable `TSM_API_TOKEN` is set, every `/ap
 and `/mcp` request needs `Authorization: Bearer <token>`. Because `EventSource`
 cannot send headers, `GET /api/v1/stream` also accepts `?token=<token>`.
 A request without a valid token gets `401 {"error": "unauthorized"}`.
+
+Admin endpoints additionally require that a token is configured at all (otherwise `403`), and
+browser requests whose `Origin` does not match `Host` are refused with `403`. Validation errors
+are `400 {"error": "<中文说明>"}`.
 
 Alert `source` is `host`, `docker`, `security`, `database` or a log source name. `DbStatus.metrics`
 keys vary by engine (e.g. `threads_connected`, `qps`, `buffer_hit_pct`, `connection_usage_pct`, `active`,
@@ -154,6 +159,28 @@ interface AgentStep {
 | GET | `/api/v1/agent/runs/{id}` | `AgentRun & { steps: AgentStep[] }` |
 | POST | `/api/v1/agent/trigger` body `{ "kind": ReportKind }` | `202 { run_id: string }`; `409` when a run is already in progress |
 | GET | `/api/v1/stream` | Server-Sent Events, see below |
+| GET | `/api/v1/settings/providers` | `{ providers: Provider[]; key_storage: "env" \| "file" \| "unavailable" }` |
+| POST (admin) | `/api/v1/settings/providers` body `ProviderInput` (`name`, `api_format`, `base_url` required) | `{ id }` |
+| PATCH (admin) | `/api/v1/settings/providers/{id}` body `ProviderInput` | `{ id }`; changing `base_url` of a provider with a stored key requires `api_key`; config-file providers are read-only (`400`) |
+| DELETE (admin) | `/api/v1/settings/providers/{id}` | `{ ok: true }`; routes using it are removed |
+| POST (admin) | `/api/v1/settings/models` body `{ provider_id?, api_format?, base_url?, auth?, api_key? }` | `{ models: string[] }` from `{base_url}/models`; a stored key is only sent to the URL it was saved for |
+| GET | `/api/v1/settings/routing` | `{ kinds: { kind, label, resolved: ResolvedModel \| null }[]; efforts: Effort[]; routes: Route[] }` |
+| PUT (admin) | `/api/v1/settings/routing` body `{ routes: Route[] }` | same as GET; replaces all routes |
+
+```ts
+type ApiFormat = "responses" | "messages";
+type AuthStyle = "api_key" | "bearer";
+type Effort = "" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"; // "" = model default
+interface Provider {
+  id: string; name: string; source: "db" | "config"; api_format: ApiFormat; base_url: string;
+  auth: AuthStyle; default_model: string; has_key: boolean; key_env?: string; updated_at: number | null;
+}
+interface ProviderInput { name?; api_format?; base_url?; auth?; default_model?; api_key?: string /* write-only, "" clears */ }
+// kind: default | hourly | daily | incident | audit | chat | log_scan | security_check | package_advice | prompt_gen
+// provider: a DB provider id or a config profile name; empty model = provider default
+interface Route { kind: string; provider: string; model: string; effort: Effort }
+interface ResolvedModel { provider: string; source: "db" | "config"; api_format: ApiFormat; base_url: string; model: string; auth: AuthStyle; effort: Effort }
+```
 
 ### SSE events (`/api/v1/stream`)
 
@@ -165,6 +192,7 @@ interface AgentStep {
 | `mode` | `{ mode: Mode; reason: string; since: number }` |
 | `agent` | `{ run_id: string; status: AgentRun["status"]; step: AgentStep \| null }` (`step` null = status change only) |
 | `report` | `ReportSummary` |
+| `settings` | `{ generation: number }` (runtime settings changed; refetch) |
 
 A `ping` comment is sent every 15 s.
 

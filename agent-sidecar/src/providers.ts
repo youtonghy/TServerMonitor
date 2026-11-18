@@ -2,7 +2,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModel } from 'ai';
 
-import type { ModelSpec } from './protocol.js';
+import type { Effort, ModelSpec } from './protocol.js';
 
 /**
  * Builds a model for any endpoint that speaks one of two wire formats:
@@ -29,7 +29,18 @@ export function createModel(spec: ModelSpec): LanguageModel {
   }
 }
 
-/** Provider options that keep requests stateless and portable across relays. */
-export const providerOptions = {
-  openai: { store: false, parallelToolCalls: false },
-};
+/**
+ * Provider options that keep requests stateless and portable across relays. Relay model ids are
+ * often unknown to the SDK, which would silently drop the reasoning setting; an explicit effort
+ * therefore marks the model as a reasoning model.
+ */
+export function providerOptionsFor(spec: ModelSpec, reasoning: Effort | undefined) {
+  return {
+    openai: { store: false, parallelToolCalls: false, ...(reasoning ? { forceReasoning: true } : {}) },
+  };
+}
+
+/** Portable reasoning level for `generateText({ reasoning })`; undefined = provider default. */
+export function reasoningFor(spec: ModelSpec): Effort | undefined {
+  return spec.effort ? spec.effort : undefined;
+}

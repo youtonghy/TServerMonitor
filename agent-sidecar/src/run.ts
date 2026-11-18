@@ -1,7 +1,7 @@
 import { generateText, isStepCount, jsonSchema, Output, tool, type ToolSet } from 'ai';
 
 import { type RunMessage, send } from './protocol.js';
-import { createModel, providerOptions } from './providers.js';
+import { createModel, providerOptionsFor, reasoningFor } from './providers.js';
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
@@ -87,6 +87,28 @@ function isStructuredOutputFailure(e: unknown): boolean {
   );
 }
 
+/** Relays often reject unknown parameters such as reasoning effort with HTTP 400. */
+function isBadRequest(e: unknown): boolean {
+  return (e as { statusCode?: number }).statusCode === 400 || /\b400\b/.test(errorMessage(e));
+}
+
+/**
+ * Runs `fn` with the configured reasoning effort; if the endpoint rejects the request with 400,
+ * retries once without it so a relay that does not understand the parameter still works.
+ */
+export async function withEffort<T>(
+  effort: ReturnType<typeof reasoningFor>,
+  fn: (reasoning: ReturnType<typeof reasoningFor>) => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn(effort);
+  } catch (e) {
+    if (!effort || !isBadRequest(e)) throw e;
+    process.stderr.write(`request with reasoning=${effort} rejected (${errorMessage(e)}), retrying without it\n`);
+    return fn(undefined);
+  }
+}
+
 export async function runTask(msg: RunMessage): Promise<void> {
   const runId = msg.run_id;
   const onStepFinish = (step: { text: string }) => {
@@ -96,8 +118,9 @@ export async function runTask(msg: RunMessage): Promise<void> {
     const model = createModel(msg.model);
     const tools = buildTools(msg);
     try {
-      const result = await generateText({
+      const result = await withEffort(reasoningFor(msg.model), (reasoning) => generateText({
         model,
+        reasoning,
         system: msg.system,
         prompt: msg.prompt,
         tools,
@@ -105,9 +128,9 @@ export async function runTask(msg: RunMessage): Promise<void> {
         // +1: producing the structured output is a step of its own
         stopWhen: isStepCount(msg.max_steps + 1),
         onStepFinish,
-        providerOptions,
+        providerOptions: providerOptionsFor(msg.model, reasoning),
         maxRetries: 2,
-      });
+      }));
       send({ type: 'result', run_id: runId, output: result.output, usage: result.totalUsage, mode: 'structured' });
       return;
     } catch (e) {
@@ -116,16 +139,17 @@ export async function runTask(msg: RunMessage): Promise<void> {
     }
 
     // Text-mode fallback for endpoints without structured output support.
-    const result = await generateText({
+    const result = await withEffort(reasoningFor(msg.model), (reasoning) => generateText({
       model,
+      reasoning,
       system: `${msg.system}\n\n最终回答只输出一个 JSON 对象，不要输出其他文字。JSON 必须符合以下 JSON Schema：\n${JSON.stringify(msg.output_schema)}`,
       prompt: msg.prompt,
       tools,
       stopWhen: isStepCount(msg.max_steps + 1),
       onStepFinish,
-      providerOptions,
+      providerOptions: providerOptionsFor(msg.model, reasoning),
       maxRetries: 2,
-    });
+    }));
     send({ type: 'result', run_id: runId, output: extractJson(result.text), usage: result.totalUsage, mode: 'text' });
   } catch (e) {
     send({ type: 'error', run_id: runId, message: errorMessage(e) });
