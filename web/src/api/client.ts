@@ -1,7 +1,7 @@
 import type {
   Alert, AgentRun, AgentRunDetail, ContainerInfo, Conversation, ConversationDetail, NewConversation, ContainerLogsResponse, DailyErrorCount, DbStatus,
   Finding, LogCluster, LogRatesResponse, LogSource, MetricsRange, MetricsResponse, ModelsRequest, PortInfo,
-  ChannelInput, ChannelsResponse, Prompt, PromptInput, ProviderInput, ProvidersResponse, TaskInput, TasksResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
+  AccessResponse, ChannelInput, ChannelsResponse, Prompt, PromptInput, ProviderInput, ProvidersResponse, TaskInput, TasksResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
   StatusResponse, TriggerResponse,
 } from "./types";
 
@@ -148,6 +148,7 @@ export interface Api {
   updateChannel(id: string, input: ChannelInput): Promise<{ id: string }>;
   deleteChannel(id: string): Promise<{ ok: true }>;
   testChannel(id: string): Promise<{ ok: true }>;
+  access(windowMins?: number): Promise<AccessResponse>;
 }
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -203,6 +204,7 @@ const httpApi: Api = {
   updateChannel: (id, input) => request(`/settings/notify/${encodeURIComponent(id)}`, json("PATCH", input)),
   deleteChannel: id => request(`/settings/notify/${encodeURIComponent(id)}`, { method: "DELETE" }),
   testChannel: id => request(`/settings/notify/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  access: (window = 15) => request(`/access${query({ window })}`),
 };
 
 /**

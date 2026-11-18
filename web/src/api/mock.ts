@@ -890,6 +890,35 @@ export const mockApi: Api = {
     channels.splice(index, 1);
     return delay({ ok: true as const });
   },
+  access: (window = 15) => {
+    const now = Math.floor(Date.now() / MIN) * MIN;
+    const series = Array.from({ length: window }, (_, i) => {
+      const requests = Math.round(820 + 180 * Math.sin(i / 3) + Math.random() * 90);
+      return { ts: now - (window - 1 - i) * MIN, requests, s4xx: Math.round(requests * 0.03), s5xx: i > window - 4 ? Math.round(requests * 0.06) : Math.round(requests * 0.004) };
+    });
+    const requests = series.reduce((n, p) => n + p.requests, 0);
+    const s4 = series.reduce((n, p) => n + p.s4xx, 0);
+    const s5 = series.reduce((n, p) => n + p.s5xx, 0);
+    return delay({
+      sources: ["nginx-access"],
+      stats: {
+        window_mins: window, requests, requests_per_min: requests / window,
+        status: [Math.round((requests - s4 - s5) * 0.93), Math.round((requests - s4 - s5) * 0.07), s4, s5],
+        error_rate_5xx: s5 / requests, bytes: requests * 5_400, series,
+        top_paths: [
+          { path: "GET /api/orders/<n>", requests: Math.round(requests * 0.31), s5xx: Math.round(s5 * 0.7) },
+          { path: "GET /static/<*>", requests: Math.round(requests * 0.22), s5xx: 0 },
+          { path: "POST /api/login", requests: Math.round(requests * 0.09), s5xx: Math.round(s5 * 0.2) },
+          { path: "GET /healthz", requests: Math.round(requests * 0.05), s5xx: 0 },
+        ],
+        top_ips: [
+          { ip: "203.0.113.42", requests: Math.round(requests * 0.12) },
+          { ip: "198.51.100.7", requests: Math.round(requests * 0.08) },
+          { ip: "10.0.3.15", requests: Math.round(requests * 0.05) },
+        ],
+      },
+    }, 250);
+  },
   testChannel: id => (channels.some(c => c.id === id) ? delay({ ok: true as const }, 800) : Promise.reject(new ApiError(404, "channel not found"))),
   cancelRun: runId => {
     const r = runs.find(x => x.run.id === runId && x.run.status === "running");

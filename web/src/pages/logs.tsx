@@ -6,6 +6,7 @@ import { Select } from "@/components/arc/select/select";
 import { SortableDataTable, type DataColumn } from "@/components/arc/sortable-data-table/sortable-data-table";
 import { Streamgraph, type StreamgraphDatum } from "@/components/arc/streamgraph/streamgraph";
 import { api } from "@/api/client";
+import { AccessPanel } from "@/components/access-panel";
 import type { LogCluster, LogRatesResponse, LogSource } from "@/api/types";
 import { useQuery } from "@/api/useQuery";
 import { PageHeader, Section, useNow } from "@/components/panel";
@@ -92,7 +93,9 @@ export default function LogsPage() {
 
   return (
     <>
-      <PageHeader title="日志" description="各日志来源的速率、错误分布与聚类模板" />
+      <PageHeader title="日志" description="实时访问、各日志来源的速率、错误分布与聚类模板" />
+
+      <AccessPanel />
 
       <Section
         title="各来源日志量"

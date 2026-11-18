@@ -225,6 +225,19 @@ export interface Prompt {
 }
 export interface PromptInput { name?: string; description?: string; body?: string }
 
+// Real-time access analysis (nginx access logs)
+
+export interface AccessStats {
+  window_mins: number; requests: number; requests_per_min: number;
+  /** [2xx, 3xx, 4xx, 5xx] */
+  status: [number, number, number, number];
+  error_rate_5xx: number; bytes: number;
+  series: { ts: number; requests: number; s4xx: number; s5xx: number }[];
+  top_paths: { path: string; requests: number; s5xx: number }[];
+  top_ips: { ip: string; requests: number }[];
+}
+export interface AccessResponse { sources: string[]; stats: AccessStats }
+
 // Notification channels
 
 export type ChannelKind = "telegram" | "email" | "webhook";
