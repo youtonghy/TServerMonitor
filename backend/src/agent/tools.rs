@@ -21,8 +21,38 @@ pub struct ToolCtx<'a> {
     pub sandbox: &'a Sandbox,
 }
 
+/// Read-only tools that are also served over MCP (the workspace/script tools are not).
+pub const MCP_SHARED: &[&str] = &[
+    "get_system_status",
+    "analyze_logs",
+    "get_access_stats",
+    "get_host_metrics",
+    "search_log_clusters",
+    "list_containers",
+];
+
 pub fn definitions() -> Vec<Value> {
     vec![
+        json!({
+            "name": "get_system_status",
+            "description": "当前系统状态总览：主机实时指标、健康评分与各维度、运行模式、容器概况、未处理告警数、AI 状态和最新报告摘要。",
+            "input_schema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "analyze_logs",
+            "description": "日志分析汇总：各日志源的累计与当前速率、指定时间内错误最多的模板、慢日志模板，以及每小时错误数趋势。适合先用它定位问题，再用 search_log_clusters 深入。",
+            "input_schema": { "type": "object", "properties": {
+                "since_hours": { "type": "number", "minimum": 0.1, "maximum": 168, "description": "统计时间范围（小时），默认 1" },
+                "source": { "type": "string", "description": "只看某个日志源" }
+            }, "additionalProperties": false }
+        }),
+        json!({
+            "name": "get_access_stats",
+            "description": "实时访问分析（来自 nginx 访问日志）：每分钟请求数、状态码分布（2xx/3xx/4xx/5xx）、5xx 比例、流量，以及请求最多的接口和来源地址（来源地址已打码）。",
+            "input_schema": { "type": "object", "properties": {
+                "window_mins": { "type": "integer", "minimum": 1, "maximum": 60, "description": "统计最近多少分钟，默认 15" }
+            }, "additionalProperties": false }
+        }),
         json!({
             "name": "get_host_metrics",
             "description": "主机指标统计（CPU、内存、Swap、磁盘、负载、磁盘IO、网络）：每项给出最小/平均/最大/P95/最新值，以及最新的磁盘挂载点与网卡明细。",
@@ -227,6 +257,75 @@ fn find_docker_id(state: &Shared, needle: &str) -> Option<String> {
 pub async fn execute(ctx: &ToolCtx<'_>, name: &str, input: &Value) -> Result<Value> {
     let state = ctx.state;
     let out = match name {
+        "get_system_status" => json!(crate::api::snapshot(state).await?),
+        "analyze_logs" => {
+            #[derive(Deserialize, Default)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                since_hours: Option<f64>,
+                source: Option<String>,
+            }
+            let a: A = if input.is_null() {
+                A::default()
+            } else {
+                parse(input)?
+            };
+            let hours = a.since_hours.unwrap_or(1.0).clamp(0.1, 168.0);
+            let since = now_ms() - (hours * 3_600_000.0) as i64;
+            let top = |level| store::ClusterQuery {
+                source: a.source.as_deref(),
+                level: Some(level),
+                since: Some(since),
+                limit: 15,
+                order_by_count: true,
+                ..Default::default()
+            };
+            let errors = store::query_clusters(&state.db, &top("error")).await?;
+            let warnings = store::query_clusters(&state.db, &top("warning")).await?;
+            let slow = store::query_clusters(&state.db, &top("slow")).await?;
+            let span = ((hours * 3_600_000.0) as i64).max(3_600_000);
+            let (step, series) = store::query_log_rates(&state.db, span, now_ms()).await?;
+            let trend: Vec<Value> = series
+                .into_iter()
+                .filter(|s| a.source.as_ref().is_none_or(|src| &s.source == src))
+                .map(|s| {
+                    let (lines, errors) = s.points.iter().fold((0, 0), |acc, (_, l, e)| (acc.0 + l, acc.1 + e));
+                    json!({ "source": s.source, "lines": lines, "errors": errors, "points": s.points.iter().map(|(t, l, e)| json!([t, l, e])).collect::<Vec<_>>() })
+                })
+                .collect();
+            let sources: Vec<_> = state.read().log_sources.values().cloned().collect();
+            json!({
+                "since_hours": hours, "bucket_secs": step, "sources": sources,
+                "top_errors": errors, "top_warnings": warnings, "top_slow": slow, "rates": trend,
+                "active_bursts": state.read().bursts.clone(),
+            })
+        }
+        "get_access_stats" => {
+            #[derive(Deserialize, Default)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                window_mins: Option<i64>,
+            }
+            let a: A = if input.is_null() {
+                A::default()
+            } else {
+                parse(input)?
+            };
+            let sources: Vec<&str> = state
+                .cfg
+                .logs
+                .iter()
+                .filter(|l| l.kind == crate::config::LogKind::NginxAccess)
+                .map(|l| l.name.as_str())
+                .collect();
+            let stats = crate::collect::pipeline().access.stats(
+                a.window_mins.unwrap_or(15),
+                now_ms(),
+                15,
+                true,
+            );
+            json!({ "access_log_sources": sources, "stats": stats })
+        }
         "get_host_metrics" => {
             let a: RangeArg = parse(input)?;
             let span = store::range_ms(&a.range).context("unknown range")?;

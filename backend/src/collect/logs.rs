@@ -42,6 +42,8 @@ struct Agg {
 #[derive(Default)]
 pub struct Pipeline {
     agg: Mutex<Agg>,
+    /// Real-time request statistics for nginx access logs.
+    pub access: super::access::Access,
 }
 
 /// Burst signal for one source, evaluated on the running minute.
@@ -76,6 +78,9 @@ impl Pipeline {
     pub fn ingest(&self, source: &str, kind: LogKind, raw: &str) {
         let rec = preprocess::process(kind, raw);
         let now = now_ms();
+        if kind == LogKind::NginxAccess {
+            self.access.record(raw, now);
+        }
         let minute = minute_of(now);
         let is_err = rec.level.counts_as_error();
         let mut agg = self.agg.lock().unwrap_or_else(|e| e.into_inner());

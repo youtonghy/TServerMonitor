@@ -174,7 +174,8 @@ hourly = "fast"
 ## 对外接口
 
 - REST + SSE：见 [`docs/api.md`](docs/api.md)。
-- MCP（Streamable HTTP）：`http://127.0.0.1:8787/mcp`，工具有 `get_health_snapshot`、`list_alerts`、`get_latest_report`、`get_report`、`list_findings`。
+- MCP（Streamable HTTP）：`http://127.0.0.1:8787/mcp`，工具有 `get_health_snapshot`、`list_alerts`、`get_latest_report`、`get_report`、`list_findings`，以及与内置 Agent 共用实现的 `get_system_status`（系统状态分析）、`analyze_logs`（日志分析）、`get_access_stats`（实时访问分析，来源地址打码）、`get_host_metrics`、`search_log_clusters`、`list_containers`。全部只读，不暴露脚本执行类工具。
+- 实时访问分析：配置 `kind = "nginx_access"` 的日志源后，日志页顶部显示每分钟请求数、状态码分布、5xx 比例、热门接口与来源地址（内存中保留最近 1 小时）。
 - Webhook：`[[notify.webhooks]]` 配置后，告警和报告会 POST 过去；配置 `secret_env` 后带 `X-TSM-Signature: sha256=<HMAC>`。
 
 ## 本地开发

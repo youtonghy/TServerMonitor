@@ -153,6 +153,7 @@ interface AgentStep {
 | GET | `/api/v1/logs/clusters?source=&level=&limit=100` | `LogCluster[]` sorted by `last_seen` desc |
 | GET | `/api/v1/logs/daily-errors?days=365` | `{ date: "YYYY-MM-DD"; count: number }[]` |
 | GET | `/api/v1/findings?include_resolved=false` | `Finding[]` |
+| GET | `/api/v1/access?window=15` (1..60 minutes) | `{ sources: string[]; stats: AccessStats }` from `nginx_access` sources, kept in memory for 1 h; client addresses unmasked |
 | GET | `/api/v1/ports` | `{ proto: "tcp" \| "udp"; addr: string; port: number; process: string \| null; exposed: boolean }[]` |
 | GET | `/api/v1/db` | `{ name: string; kind: "mysql" \| "postgres"; ok: boolean; error: string \| null; metrics: Record<string, number>; ts: number }[]` |
 | GET | `/api/v1/alerts?status=open\|all&limit=100` | `Alert[]` newest first |
@@ -235,6 +236,14 @@ interface NotifyChannel {
 // ChannelInput = Partial<NotifyChannel without id/source/has_secret> & { secret?: string /* write-only */ }
 // Webhooks receive every alert; telegram/email only at or above min_severity. "report" on chat/email
 // channels means the daily report and critical incidents; "digest" is the hourly warning summary.
+interface AccessStats {
+  window_mins: number; requests: number; requests_per_min: number;
+  status: [number, number, number, number]; // 2xx, 3xx, 4xx, 5xx
+  error_rate_5xx: number; bytes: number;
+  series: { ts: number; requests: number; s4xx: number; s5xx: number }[];  // per minute
+  top_paths: { path: string /* "METHOD /templated/<n>" */; requests: number; s5xx: number }[];
+  top_ips: { ip: string; requests: number }[];
+}
 interface ResolvedModel { provider: string; source: "db" | "config"; api_format: ApiFormat; base_url: string; model: string; auth: AuthStyle; effort: Effort }
 ```
 
@@ -257,7 +266,10 @@ A `ping` comment is sent every 15 s.
 
 `POST/GET /mcp` serves the Model Context Protocol over Streamable HTTP. Tools:
 `get_health_snapshot`, `list_alerts { status?, limit? }`, `get_latest_report { kind? }`,
-`get_report { id }`, `list_findings`. All are read-only.
+`get_report { id }`, `list_findings`, plus the analysis tools shared with the built-in agent:
+`get_system_status`, `analyze_logs { since_hours?, source? }`, `get_access_stats { window_mins? }`
+(client addresses masked), `get_host_metrics { range }`, `search_log_clusters { source?, level?, query?, since_hours?, limit? }`,
+`list_containers`. All are read-only; the agent's workspace/script tools are not exposed.
 
 ## Outbound webhooks
 

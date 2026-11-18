@@ -1,5 +1,6 @@
 //! Side-channel collectors. Every collector is read-only with respect to the host.
 
+pub mod access;
 pub mod db;
 pub mod docker;
 pub mod host;

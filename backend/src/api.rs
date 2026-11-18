@@ -343,6 +343,27 @@ struct FindingsQ {
     include_resolved: Option<bool>,
 }
 
+#[derive(Deserialize)]
+struct AccessQ {
+    window: Option<i64>,
+}
+
+/// Dashboard view of real-time access statistics (client addresses unmasked).
+async fn get_access(State(state): State<Shared>, Query(q): Query<AccessQ>) -> ApiResult<Value> {
+    let sources: Vec<&str> = state
+        .cfg
+        .logs
+        .iter()
+        .filter(|l| l.kind == crate::config::LogKind::NginxAccess)
+        .map(|l| l.name.as_str())
+        .collect();
+    let stats =
+        crate::collect::pipeline()
+            .access
+            .stats(q.window.unwrap_or(15), now_ms(), 20, false);
+    Ok(Json(json!({ "sources": sources, "stats": stats })))
+}
+
 async fn get_findings(
     State(state): State<Shared>,
     Query(q): Query<FindingsQ>,
@@ -1056,6 +1077,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/logs/clusters", get(get_log_clusters))
         .route("/api/v1/logs/daily-errors", get(get_daily_errors))
         .route("/api/v1/findings", get(get_findings))
+        .route("/api/v1/access", get(get_access))
         .route("/api/v1/ports", get(get_ports))
         .route("/api/v1/db", get(get_db))
         .route("/api/v1/alerts", get(get_alerts))
@@ -1199,5 +1221,103 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 400);
+    }
+
+    /// JSON-RPC over MCP Streamable HTTP; the reply may come as SSE.
+    async fn mcp_call(
+        c: &reqwest::Client,
+        url: &str,
+        session: Option<&str>,
+        body: Value,
+    ) -> (Option<String>, Value) {
+        let mut req = c
+            .post(url)
+            .header("accept", "application/json, text/event-stream")
+            .json(&body);
+        if let Some(s) = session {
+            req = req.header("mcp-session-id", s);
+        }
+        let resp = req.send().await.unwrap();
+        let sid = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let text = resp.text().await.unwrap();
+        let json = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .find(|l| l.starts_with('{'))
+            .map(str::to_string)
+            .unwrap_or(text);
+        (sid, serde_json::from_str(&json).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn mcp_lists_shared_tools_without_workspace_tools() {
+        let mut cfg = crate::config::Config::default();
+        cfg.server.token_env = "TSM_TEST_API_TOKEN_UNSET".into();
+        let dir = tempfile::tempdir().unwrap();
+        cfg.storage.data_dir = dir.path().to_path_buf();
+        let cfg = std::sync::Arc::new(cfg);
+        let state = crate::state::AppState::new(cfg.clone(), crate::store::open_memory().await);
+        let sb = std::sync::Arc::new(
+            crate::sandbox::Sandbox::init(dir.path(), cfg.sandbox.clone()).unwrap(),
+        );
+        state.set_agent(crate::agent::AgentManager::init(&state, sb).await);
+        crate::collect::pipeline().access.record(
+            r#"203.0.113.9 - - [x] "GET /health HTTP/1.1" 200 2 "-" "-""#,
+            now_ms(),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, router(state)).await.unwrap() });
+        let c = reqwest::Client::new();
+
+        let (sid, init) = mcp_call(&c, &url, None, json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "0" } } })).await;
+        assert!(init["result"].is_object(), "{init}");
+        let sid = sid.expect("session id");
+        let _ = mcp_call(
+            &c,
+            &url,
+            Some(&sid),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        )
+        .await;
+        let (_, list) = mcp_call(
+            &c,
+            &url,
+            Some(&sid),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        )
+        .await;
+        let names: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for n in [
+            "get_health_snapshot",
+            "list_alerts",
+            "get_latest_report",
+            "get_report",
+            "list_findings",
+        ]
+        .iter()
+        .chain(crate::agent::tools::MCP_SHARED)
+        {
+            assert!(names.contains(n), "{n} missing from {names:?}");
+        }
+        for n in ["run_python", "write_script", "export_log_sample"] {
+            assert!(!names.contains(&n), "{n} must not be exposed");
+        }
+        let (_, call) = mcp_call(&c, &url, Some(&sid), json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "get_access_stats", "arguments": { "window_mins": 5 } } })).await;
+        let text = call["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("203.0.113.x"), "{call}");
+        assert!(!text.contains("203.0.113.9"));
     }
 }
