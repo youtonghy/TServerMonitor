@@ -1,7 +1,7 @@
 import type {
   Alert, AgentRun, AgentRunDetail, ContainerInfo, Conversation, ConversationDetail, NewConversation, ContainerLogsResponse, DailyErrorCount, DbStatus,
   Finding, LogCluster, LogRatesResponse, LogSource, MetricsRange, MetricsResponse, ModelsRequest, PortInfo,
-  AccessResponse, ChannelInput, ChannelsResponse, Prompt, PromptInput, ProviderInput, ProvidersResponse, TaskInput, TasksResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
+  AccessResponse, ChannelInput, PackageJob, PackageOp, PackagesResponse, ChannelsResponse, Prompt, PromptInput, ProviderInput, ProvidersResponse, TaskInput, TasksResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
   StatusResponse, TriggerResponse,
 } from "./types";
 
@@ -149,6 +149,11 @@ export interface Api {
   deleteChannel(id: string): Promise<{ ok: true }>;
   testChannel(id: string): Promise<{ ok: true }>;
   access(windowMins?: number): Promise<AccessResponse>;
+  packages(): Promise<PackagesResponse>;
+  checkPackages(): Promise<PackagesResponse>;
+  packageJobs(): Promise<PackageJob[]>;
+  packageJob(id: number): Promise<PackageJob>;
+  startPackageJob(op: PackageOp, packages?: string[]): Promise<{ id: number }>;
 }
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -205,6 +210,11 @@ const httpApi: Api = {
   deleteChannel: id => request(`/settings/notify/${encodeURIComponent(id)}`, { method: "DELETE" }),
   testChannel: id => request(`/settings/notify/${encodeURIComponent(id)}/test`, { method: "POST" }),
   access: (window = 15) => request(`/access${query({ window })}`),
+  packages: () => request("/packages"),
+  checkPackages: () => request("/packages/check", { method: "POST" }),
+  packageJobs: () => request("/packages/jobs"),
+  packageJob: id => request(`/packages/jobs/${id}`),
+  startPackageJob: (op, packages = []) => request("/packages/jobs", json("POST", { op, packages })),
 };
 
 /**

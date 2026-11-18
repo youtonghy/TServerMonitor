@@ -16,6 +16,7 @@ const pages: Record<string, ComponentType> = {
   tasks: lazy(() => import('@/pages/tasks')),
   settings: lazy(() => import('@/pages/settings')),
   alerts: lazy(() => import('@/pages/alerts')),
+  packages: lazy(() => import('@/pages/packages')),
 }
 
 const Wall = lazy(() => import('@/pages/wall'))

@@ -6,7 +6,7 @@ import type {
   Diagnosis, Finding, HostMetrics, LogCluster, LogRatesResponse, LogSource, MetricPoint, MetricsRange, ModeState,
   PortInfo, Report, ReportKind, ReportSummary, Snapshot, StreamEventMap, StreamEventName,
 } from "./types";
-import type { Conversation, ConversationDetail, NotifyChannel, Prompt, Provider, ResolvedModel, Route, RoutingResponse, SystemJob, Task } from "./types";
+import type { Conversation, ConversationDetail, NotifyChannel, PackageJob, PackageOp, PackagesResponse, Prompt, Provider, ResolvedModel, Route, RoutingResponse, SystemJob, Task } from "./types";
 
 const GiB = 1024 ** 3;
 const MiB = 1024 ** 2;
@@ -687,6 +687,44 @@ function alertAction(id: number, patch: Partial<Alert>): Promise<Alert> {
   return delay({ ...a });
 }
 
+// Package updates
+
+const packageReport: PackagesResponse = {
+  checked_at: BOOT - 2 * HOUR, managers: ["apt"], errors: [], in_container: false,
+  packages: [
+    { manager: "apt", name: "openssl", current: "3.0.2-0ubuntu1.15", available: "3.0.2-0ubuntu1.18", source: "Ubuntu:22.04/jammy-security", security: true },
+    { manager: "apt", name: "openssh-server", current: "1:8.9p1-3ubuntu0.10", available: "1:8.9p1-3ubuntu0.13", source: "Ubuntu:22.04/jammy-security", security: true },
+    { manager: "apt", name: "linux-image-generic", current: "5.15.0.119.119", available: "5.15.0.125.125", source: "Ubuntu:22.04/jammy-security", security: true },
+    { manager: "apt", name: "nginx", current: "1.18.0-6ubuntu14.4", available: "1.18.0-6ubuntu14.5", source: "Ubuntu:22.04/jammy-updates", security: false },
+    { manager: "apt", name: "tzdata", current: "2024a-0ubuntu0.22.04", available: "2024b-0ubuntu0.22.04", source: "Ubuntu:22.04/jammy-updates", security: false },
+  ],
+};
+const packageJobs: PackageJob[] = [
+  { id: 1, op: "refresh", packages: [], status: "succeeded", exit_code: 0, log: "$ apt-get update\nHit:1 http://archive.ubuntu.com/ubuntu jammy InRelease\nReading package lists...\n", started_at: BOOT - 2 * HOUR, finished_at: BOOT - 2 * HOUR + 9_000 },
+];
+
+function simulateJob(op: PackageOp, names: string[]): number {
+  const id = Math.max(0, ...packageJobs.map(j => j.id)) + 1;
+  const job: PackageJob = { id, op, packages: names, status: "running", exit_code: null, log: "", started_at: Date.now(), finished_at: null };
+  packageJobs.unshift(job);
+  const targets = op === "upgrade_packages" ? names : op === "upgrade_security" ? packageReport.packages.filter(p => p.security).map(p => p.name) : packageReport.packages.map(p => p.name);
+  const lines = op === "refresh"
+    ? ["$ apt-get update", "Hit:1 http://archive.ubuntu.com/ubuntu jammy InRelease", "Get:2 http://security.ubuntu.com/ubuntu jammy-security InRelease [129 kB]", "Reading package lists..."]
+    : [`$ apt-get -y --only-upgrade install -- ${targets.join(" ")}`, "Reading package lists...", ...targets.map(t => `Unpacking ${t} ...`), ...targets.map(t => `Setting up ${t} ...`)];
+  emit("package_job", { id, status: "running", line: null });
+  lines.forEach((line, i) => setTimeout(() => {
+    job.log += `${line}\n`;
+    emit("package_job", { id, status: "running", line });
+  }, 500 * (i + 1)));
+  setTimeout(() => {
+    Object.assign(job, { status: "succeeded", exit_code: 0, finished_at: Date.now() });
+    if (op !== "refresh") packageReport.packages = packageReport.packages.filter(p => !targets.includes(p.name));
+    packageReport.checked_at = Date.now();
+    emit("package_job", { id, status: "succeeded", line: null });
+  }, 500 * (lines.length + 1));
+  return id;
+}
+
 // API
 
 function snapshot(): Snapshot {
@@ -918,6 +956,20 @@ export const mockApi: Api = {
         ],
       },
     }, 250);
+  },
+  packages: () => delay({ ...packageReport, packages: [...packageReport.packages], updater: { available: true, socket: "/run/tsmonitor-updater/updater.sock" } }),
+  checkPackages: () => {
+    packageReport.checked_at = Date.now();
+    return delay({ ...packageReport, packages: [...packageReport.packages] }, 900);
+  },
+  packageJobs: () => delay(packageJobs.map(({ log: _log, ...j }) => j)),
+  packageJob: id => {
+    const j = packageJobs.find(x => x.id === id);
+    return j ? delay({ ...j }) : Promise.reject(new ApiError(404, "job not found"));
+  },
+  startPackageJob: (op, names = []) => {
+    if (packageJobs.some(j => j.status === "running")) return Promise.reject(new ApiError(400, "已有更新任务在运行"));
+    return delay({ id: simulateJob(op, names) });
   },
   testChannel: id => (channels.some(c => c.id === id) ? delay({ ok: true as const }, 800) : Promise.reject(new ApiError(404, "channel not found"))),
   cancelRun: runId => {

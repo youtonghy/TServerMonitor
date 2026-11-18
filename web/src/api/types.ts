@@ -238,6 +238,25 @@ export interface AccessStats {
 }
 export interface AccessResponse { sources: string[]; stats: AccessStats }
 
+// Package updates
+
+export interface PackageUpdate {
+  manager: "apt" | "dnf" | "brew"; name: string; current: string | null; available: string;
+  source: string | null; security: boolean;
+}
+export interface PackagesResponse {
+  checked_at: number | null; managers: ("apt" | "dnf" | "brew")[]; packages: PackageUpdate[]; errors: string[];
+  /** The list describes the container image, not the host. */
+  in_container: boolean;
+  /** Present on GET /packages: whether the root update helper is installed. */
+  updater?: { available: boolean; socket: string };
+}
+export type PackageOp = "refresh" | "upgrade_security" | "upgrade_all" | "upgrade_packages";
+export interface PackageJob {
+  id: number; op: PackageOp; packages: string[]; status: "running" | "succeeded" | "failed" | "unknown";
+  exit_code: number | null; log?: string; started_at: number; finished_at: number | null;
+}
+
 // Notification channels
 
 export type ChannelKind = "telegram" | "email" | "webhook";
@@ -275,5 +294,6 @@ export interface StreamEventMap {
   agent_delta: AgentDeltaEvent;
   report: ReportSummary;
   settings: { generation: number };
+  package_job: { id: number; status: PackageJob["status"]; line: string | null };
 }
 export type StreamEventName = keyof StreamEventMap;
