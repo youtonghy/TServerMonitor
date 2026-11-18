@@ -305,7 +305,7 @@ function RunBlock({ run, stream, now }: { run: AgentRunDetail; stream: string | 
             <Badge size="sm">{lookup(taskKindLabel, run.kind)}</Badge>
             <Badge size="sm" tone={runStatusTone[run.status]} dot>{runStatusLabel[run.status]}</Badge>
             <span className={`${styles.muted} ${styles.small}`}>
-              {lookup(triggerLabel, run.trigger)}触发 · {formatDateTime(run.started_at)} · 耗时 {formatElapsed(run.started_at, run.finished_at, now)} · {run.model ?? "规则引擎"}
+              {lookup(triggerLabel, run.trigger.split(":")[0])}触发 · {formatDateTime(run.started_at)} · 耗时 {formatElapsed(run.started_at, run.finished_at, now)} · {run.model ?? "规则引擎"}
             </span>
           </span>
           {run.report_id && <Link to={`/reports/${run.report_id}`}>查看报告 #{run.report_id}</Link>}

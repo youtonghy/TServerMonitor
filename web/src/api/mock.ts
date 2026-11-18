@@ -6,7 +6,7 @@ import type {
   Diagnosis, Finding, HostMetrics, LogCluster, LogRatesResponse, LogSource, MetricPoint, MetricsRange, ModeState,
   PortInfo, Report, ReportKind, ReportSummary, Snapshot, StreamEventMap, StreamEventName,
 } from "./types";
-import type { Conversation, ConversationDetail, Provider, ResolvedModel, Route, RoutingResponse } from "./types";
+import type { Conversation, ConversationDetail, Prompt, Provider, ResolvedModel, Route, RoutingResponse, SystemJob, Task } from "./types";
 
 const GiB = 1024 ** 3;
 const MiB = 1024 ** 2;
@@ -647,6 +647,31 @@ function simulateChat(conversationId: string, text: string): string {
   return id;
 }
 
+// Tasks and prompts
+
+const prompts: Prompt[] = [
+  { id: "builtin:linux_check", name: "Linux 系统健康检查", description: "CPU、内存、交换、磁盘与 I/O、负载、网络、监听端口与容器的全面体检", body: "任务：Linux 系统健康检查。依次检查并给出结论：\n1. CPU 使用率与负载……", builtin: true, route_kind: "default", updated_at: null },
+  { id: "builtin:security_check", name: "每日本机安全体检", description: "端口暴露、SSH 配置、登录爆破、待装安全更新、内核参数基线", body: "任务：每日本机安全体检。基于安全发现、监听端口和认证日志模板，检查……", builtin: true, route_kind: "security_check", updated_at: null },
+  { id: "builtin:log_scan", name: "日志扫描", description: "扫描新出现或增长最快的错误模板、慢日志与突增来源", body: "任务：日志扫描（触发原因：{trigger}）。查看各日志源的错误率趋势……", builtin: true, route_kind: "log_scan", updated_at: null },
+  { id: "builtin:package_advice", name: "包更新建议", description: "评估待升级软件包的风险与升级顺序", body: "任务：软件包更新评估……", builtin: true, route_kind: "package_advice", updated_at: null },
+  { id: "builtin:hourly", name: "小时巡检（系统内置）", description: "每小时自动运行的快速巡检", body: "任务：小时巡检。快速判断过去一小时是否有异常趋势……", builtin: true, route_kind: "hourly", updated_at: null },
+  { id: "builtin:daily", name: "每日运维简报（系统内置）", description: "每天定时生成的运维简报", body: "任务：生成每日运维简报……", builtin: true, route_kind: "daily", updated_at: null },
+  { id: "builtin:incident", name: "异常事件分析（系统内置）", description: "日志或错误突增时自动运行", body: "任务：异常事件分析（触发原因：{trigger}）……", builtin: true, route_kind: "incident", updated_at: null },
+  { id: "builtin:audit", name: "深度审计（系统内置）", description: "夜间空闲窗口内的深度审计", body: "任务：空闲窗口深度审计……", builtin: true, route_kind: "audit", updated_at: null },
+  { id: "u_nginx5xx", name: "Nginx 5xx 排查", description: "统计 5xx 的接口与上游", body: "任务：排查 Nginx 5xx。按接口和上游统计过去一小时的 5xx……", builtin: false, route_kind: "default", updated_at: BOOT - DAY },
+];
+const tasks: Task[] = [
+  { id: "t_security_check", name: "每日本机安全体检", enabled: true, builtin: true, trigger: { type: "daily", at: "03:30" }, prompt_id: "builtin:security_check", route_kind: "security_check", last_fired_at: BOOT - 7 * HOUR, cursor: null, last_run_id: null, created_at: BOOT - 10 * DAY, updated_at: BOOT - 10 * DAY },
+  { id: "t_log_scan", name: "日志定时扫描", enabled: false, builtin: true, trigger: { type: "interval", every_mins: 360 }, prompt_id: "builtin:log_scan", route_kind: "log_scan", last_fired_at: null, cursor: null, last_run_id: null, created_at: BOOT - 10 * DAY, updated_at: BOOT - 10 * DAY },
+  { id: "t_nginx", name: "Nginx 错误超阈值排查", enabled: true, builtin: false, trigger: { type: "log_threshold", source: "nginx-error", metric: "errors", count: 200, min_interval_mins: 60 }, prompt_id: "u_nginx5xx", route_kind: "log_scan", last_fired_at: BOOT - 3 * HOUR, cursor: null, last_run_id: null, created_at: BOOT - 2 * DAY, updated_at: BOOT - 2 * DAY },
+];
+const systemJobs: SystemJob[] = [
+  { id: "system:hourly", name: "小时巡检", enabled: true, trigger: "每小时整点", prompt_id: "builtin:hourly", route_kind: "hourly" },
+  { id: "system:daily", name: "每日运维简报", enabled: true, trigger: "每天 04:00", prompt_id: "builtin:daily", route_kind: "daily" },
+  { id: "system:incident", name: "异常事件分析", enabled: true, trigger: "日志错误突增（基线 3 倍且每分钟 ≥ 20）", prompt_id: "builtin:incident", route_kind: "incident" },
+  { id: "system:audit", name: "深度审计", enabled: true, trigger: "空闲窗口 01:00-05:00（CPU < 30%）", prompt_id: "builtin:audit", route_kind: "audit" },
+];
+
 // API
 
 function snapshot(): Snapshot {
@@ -774,6 +799,58 @@ export const mockApi: Api = {
     for (let i = runs.length - 1; i >= 0; i--) if (runs[i].run.conversation_id === id) runs.splice(i, 1);
     return delay({ ok: true as const });
   },
+  tasks: () => delay({ tasks: tasks.map(t => ({ ...t })), system: systemJobs }),
+  createTask: input => {
+    if (!input.name?.trim() || !input.trigger || !input.prompt_id) return Promise.reject(new ApiError(400, "名称、触发方式和提示词不能为空"));
+    const id = `t_${Math.random().toString(16).slice(2, 10)}`;
+    tasks.push({ id, name: input.name.trim(), enabled: input.enabled ?? true, builtin: false, trigger: input.trigger, prompt_id: input.prompt_id, route_kind: input.route_kind ?? "default", last_fired_at: null, cursor: Date.now(), last_run_id: null, created_at: Date.now(), updated_at: Date.now() });
+    return delay({ id });
+  },
+  updateTask: (id, input) => {
+    const t = tasks.find(x => x.id === id);
+    if (!t) return Promise.reject(new ApiError(404, "task not found"));
+    Object.assign(t, input, { updated_at: Date.now() });
+    return delay({ id });
+  },
+  deleteTask: id => {
+    const index = tasks.findIndex(x => x.id === id);
+    if (index < 0) return Promise.reject(new ApiError(404, "task not found"));
+    if (tasks[index].builtin) return Promise.reject(new ApiError(400, "内置任务不能删除，可以停用"));
+    tasks.splice(index, 1);
+    return delay({ ok: true as const });
+  },
+  runTask: id => {
+    const t = tasks.find(x => x.id === id);
+    if (!t) return Promise.reject(new ApiError(404, "task not found"));
+    if (ai.running) return delay({ run_id: null, deferred: true });
+    t.last_fired_at = Date.now();
+    const runId = simulateRun("custom");
+    t.last_run_id = runId;
+    return delay({ run_id: runId, deferred: false });
+  },
+  prompts: () => delay(prompts.map(p => ({ ...p }))),
+  createPrompt: input => {
+    if (!input.name?.trim() || !input.body?.trim()) return Promise.reject(new ApiError(400, "名称和提示词不能为空"));
+    const id = `u_${Math.random().toString(16).slice(2, 12)}`;
+    prompts.push({ id, name: input.name.trim(), description: input.description ?? "", body: input.body.trim(), builtin: false, route_kind: "default", updated_at: Date.now() });
+    return delay({ id });
+  },
+  updatePrompt: (id, input) => {
+    const p = prompts.find(x => x.id === id);
+    if (!p) return Promise.reject(new ApiError(404, "prompt not found"));
+    if (p.builtin) return Promise.reject(new ApiError(400, "内置提示词只读，可以复制后修改"));
+    Object.assign(p, input, { updated_at: Date.now() });
+    return delay({ id });
+  },
+  deletePrompt: id => {
+    const index = prompts.findIndex(x => x.id === id);
+    if (index < 0) return Promise.reject(new ApiError(404, "prompt not found"));
+    if (prompts[index].builtin) return Promise.reject(new ApiError(400, "内置提示词不能删除"));
+    if (tasks.some(t => t.prompt_id === id)) return Promise.reject(new ApiError(400, "有自动任务正在使用这个提示词，请先修改或删除这些任务"));
+    prompts.splice(index, 1);
+    return delay({ ok: true as const });
+  },
+  generatePrompt: description => delay({ body: `任务：${description}。\n1. 查看相关日志源的错误率趋势与主要错误模板；\n2. 结合主机与容器指标判断是否存在资源瓶颈；\n3. 对发现的问题给出根因判断和具体处理建议（命令或配置项）。没有明显问题时简要说明即可。` }, 1500),
   cancelRun: runId => {
     const r = runs.find(x => x.run.id === runId && x.run.status === "running");
     if (!r) return Promise.reject(new ApiError(404, "running run not found"));

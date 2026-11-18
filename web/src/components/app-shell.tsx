@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Activity, Bot, Boxes, FileText, KeyRound, LayoutDashboard, ScrollText, Settings, ShieldCheck, TrendingUp, type LucideIcon } from "lucide-react";
+import { Activity, Bot, CalendarClock, Boxes, FileText, KeyRound, LayoutDashboard, ScrollText, Settings, ShieldCheck, TrendingUp, type LucideIcon } from "lucide-react";
 import { Badge } from "@/components/arc/badge/badge";
 import { Button } from "@/components/arc/button/button";
 import { ThemeSwitch } from "@/components/arc/theme-switch/theme-switch";
@@ -21,6 +21,7 @@ export const NAV: NavItem[] = [
   { to: "/security", label: "安全", icon: ShieldCheck, match: "security" },
   { to: "/reports", label: "报告", icon: FileText, match: "reports" },
   { to: "/agent", label: "Agent", icon: Bot, match: "agent" },
+  { to: "/tasks", label: "自动任务", icon: CalendarClock, match: "tasks" },
   { to: "/settings", label: "设置", icon: Settings, match: "settings" },
 ];
 

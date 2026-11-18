@@ -96,7 +96,7 @@ export interface Diagnosis {
   anomalies: { title: string; detail: string; severity: Severity }[];
 }
 
-export type ReportKind = "hourly" | "daily" | "incident" | "audit";
+export type ReportKind = "hourly" | "daily" | "incident" | "audit" | "custom";
 export interface ReportSummary {
   id: number; kind: ReportKind; created_at: number; health_score: number;
   title: string; summary: string; generated_by: "ai" | "rules"; model: string | null; run_id: string | null;
@@ -194,6 +194,32 @@ export interface RoutingResponse {
   efforts: Effort[];
   routes: Route[];
 }
+
+// Automated tasks and the prompt library
+
+export type Trigger =
+  | { type: "interval"; every_mins: number }
+  | { type: "daily"; at: string }
+  | { type: "log_threshold"; source: string | null; metric: "lines" | "errors"; count: number; min_interval_mins: number }
+  | { type: "burst" }
+  | { type: "manual" };
+export interface Task {
+  id: string; name: string; enabled: boolean; builtin: boolean; trigger: Trigger;
+  prompt_id: string; route_kind: string;
+  last_fired_at: number | null; cursor: number | null; last_run_id: string | null;
+  created_at: number; updated_at: number;
+}
+/** Fixed jobs from [schedule] in config.toml, read-only. */
+export interface SystemJob { id: string; name: string; enabled: boolean; trigger: string; prompt_id: string; route_kind: string }
+export interface TasksResponse { tasks: Task[]; system: SystemJob[] }
+export interface TaskInput { name?: string; enabled?: boolean; trigger?: Trigger; prompt_id?: string; route_kind?: string }
+
+export interface Prompt {
+  id: string; name: string; description: string; body: string;
+  /** Built-in prompts ship with the program and are read-only. */
+  builtin: boolean; route_kind: string; updated_at: number | null;
+}
+export interface PromptInput { name?: string; description?: string; body?: string }
 
 // SSE events on /api/v1/stream
 

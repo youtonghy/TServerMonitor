@@ -1,7 +1,7 @@
 import type {
   Alert, AgentRun, AgentRunDetail, ContainerInfo, Conversation, ConversationDetail, NewConversation, ContainerLogsResponse, DailyErrorCount, DbStatus,
   Finding, LogCluster, LogRatesResponse, LogSource, MetricsRange, MetricsResponse, ModelsRequest, PortInfo,
-  ProviderInput, ProvidersResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
+  Prompt, PromptInput, ProviderInput, ProvidersResponse, TaskInput, TasksResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
   StatusResponse, TriggerResponse,
 } from "./types";
 
@@ -130,6 +130,16 @@ export interface Api {
   sendMessage(id: string, text: string): Promise<{ run_id: string }>;
   deleteConversation(id: string): Promise<{ ok: true }>;
   cancelRun(runId: string): Promise<{ ok: true }>;
+  tasks(): Promise<TasksResponse>;
+  createTask(input: TaskInput): Promise<{ id: string }>;
+  updateTask(id: string, input: TaskInput): Promise<{ id: string }>;
+  deleteTask(id: string): Promise<{ ok: true }>;
+  runTask(id: string): Promise<{ run_id: string | null; deferred: boolean }>;
+  prompts(): Promise<Prompt[]>;
+  createPrompt(input: PromptInput): Promise<{ id: string }>;
+  updatePrompt(id: string, input: PromptInput): Promise<{ id: string }>;
+  deletePrompt(id: string): Promise<{ ok: true }>;
+  generatePrompt(description: string): Promise<{ body: string }>;
 }
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -167,6 +177,16 @@ const httpApi: Api = {
   sendMessage: (id, text) => request(`/conversations/${encodeURIComponent(id)}/messages`, json("POST", { text })),
   deleteConversation: id => request(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
   cancelRun: runId => request(`/agent/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
+  tasks: () => request("/tasks"),
+  createTask: input => request("/tasks", json("POST", input)),
+  updateTask: (id, input) => request(`/tasks/${encodeURIComponent(id)}`, json("PATCH", input)),
+  deleteTask: id => request(`/tasks/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  runTask: id => request(`/tasks/${encodeURIComponent(id)}/run`, { method: "POST" }),
+  prompts: () => request("/prompts"),
+  createPrompt: input => request("/prompts", json("POST", input)),
+  updatePrompt: (id, input) => request(`/prompts/${encodeURIComponent(id)}`, json("PATCH", input)),
+  deletePrompt: id => request(`/prompts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  generatePrompt: description => request("/prompts/generate", json("POST", { description })),
 };
 
 /**

@@ -43,7 +43,7 @@ export const findingCategoryLabel: Record<string, string> = {
 };
 
 export const reportKindLabel: Record<ReportKind, string> = {
-  hourly: "小时报告", daily: "日报", incident: "事件报告", audit: "审计报告",
+  hourly: "小时报告", daily: "日报", incident: "事件报告", audit: "审计报告", custom: "自定义任务",
 };
 
 export const runStatusLabel: Record<AgentRunStatus, string> = {
@@ -96,6 +96,7 @@ export const dimensionLabel: Record<string, string> = {
 
 export const triggerLabel: Record<string, string> = {
   schedule: "定时", manual: "手动", alert: "告警", mode: "模式切换",
+  user: "用户", task: "自动任务", burst: "日志突增",
 };
 
 export const alertSourceLabel: Record<string, string> = {
