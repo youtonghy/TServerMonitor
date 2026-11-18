@@ -29,6 +29,7 @@ pub const MCP_SHARED: &[&str] = &[
     "get_host_metrics",
     "search_log_clusters",
     "list_containers",
+    "list_package_updates",
 ];
 
 pub fn definitions() -> Vec<Value> {
@@ -45,6 +46,11 @@ pub fn definitions() -> Vec<Value> {
                 "since_hours": { "type": "number", "minimum": 0.1, "maximum": 168, "description": "统计时间范围（小时），默认 1" },
                 "source": { "type": "string", "description": "只看某个日志源" }
             }, "additionalProperties": false }
+        }),
+        json!({
+            "name": "list_package_updates",
+            "description": "本机待更新的软件包（apt / dnf / Homebrew）：名称、当前版本、可用版本、来源仓库、是否安全更新，以及检查时间。列表基于本机已有的软件包索引，不会刷新索引或安装任何东西。",
+            "input_schema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
             "name": "get_access_stats",
@@ -258,6 +264,7 @@ pub async fn execute(ctx: &ToolCtx<'_>, name: &str, input: &Value) -> Result<Val
     let state = ctx.state;
     let out = match name {
         "get_system_status" => json!(crate::api::snapshot(state).await?),
+        "list_package_updates" => json!(crate::collect::packages::last()),
         "analyze_logs" => {
             #[derive(Deserialize, Default)]
             #[serde(deny_unknown_fields)]

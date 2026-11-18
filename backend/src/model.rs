@@ -505,6 +505,12 @@ pub enum Event {
         text: String,
     },
     Report(ReportSummary),
+    /// Package update job progress: a log line, or a status change when `line` is None.
+    PackageJob {
+        id: i64,
+        status: String,
+        line: Option<String>,
+    },
     /// Runtime settings changed; carries no secrets.
     Settings {
         generation: u64,
@@ -522,6 +528,7 @@ impl Event {
             Self::AgentDelta { .. } => "agent_delta",
             Self::Report(_) => "report",
             Self::Settings { .. } => "settings",
+            Self::PackageJob { .. } => "package_job",
         }
     }
 
@@ -548,6 +555,9 @@ impl Event {
             ),
             Self::Report(r) => serde_json::to_value(r),
             Self::Settings { generation } => Ok(serde_json::json!({ "generation": generation })),
+            Self::PackageJob { id, status, line } => {
+                Ok(serde_json::json!({ "id": id, "status": status, "line": line }))
+            }
         }
         .unwrap_or(serde_json::Value::Null)
     }

@@ -1,0 +1,38 @@
+# OPTIONAL package update helper for TServerMonitor. Without it the dashboard can only LIST
+# pending updates. With it, an operator holding the API token can refresh the package index and
+# install updates (apt or dnf) from the dashboard. The monitoring daemon stays unprivileged and
+# only talks to this helper over /run/tsmonitor-updater/updater.sock.
+#
+# Install (as root):
+#   install -m 0600 updater.example.toml /etc/tsmonitor/updater.toml   # set allowed_uids = [$(id -u tsmonitor)]
+#   cp tsmonitor-updater.service /etc/systemd/system/ && systemctl daemon-reload
+#   systemctl enable --now tsmonitor-updater
+# Start with dry_run = true in updater.toml to see the exact commands before allowing real upgrades.
+
+[Unit]
+Description=TServerMonitor package update helper (root, fixed operations only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/tsmonitor updater --updater-config /etc/tsmonitor/updater.toml
+RuntimeDirectory=tsmonitor-updater
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=10
+# package managers must write system paths; keep the rest tight
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

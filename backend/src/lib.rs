@@ -18,3 +18,4 @@ pub mod state;
 pub mod store;
 pub mod tasks;
 pub mod telegram_bot;
+pub mod updater;

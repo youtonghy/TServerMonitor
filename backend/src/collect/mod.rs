@@ -5,6 +5,7 @@ pub mod db;
 pub mod docker;
 pub mod host;
 pub mod logs;
+pub mod packages;
 pub mod security;
 
 use std::sync::LazyLock;
@@ -24,4 +25,5 @@ pub fn spawn_all(state: &Shared) {
     logs::spawn(state);
     security::spawn(state);
     db::spawn(state);
+    packages::spawn(state);
 }

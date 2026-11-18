@@ -163,6 +163,14 @@ impl McpServer {
     }
 
     #[tool(
+        description = "Pending package updates (apt / dnf / Homebrew) with versions and whether they are security updates. Read-only; nothing is installed."
+    )]
+    async fn list_package_updates(&self) -> Result<CallToolResult, ErrorData> {
+        self.shared("list_package_updates", serde_json::json!({}))
+            .await
+    }
+
+    #[tool(
         description = "Docker containers with resource use, restarts, OOM and health, plus 24h container events."
     )]
     async fn list_containers(&self) -> Result<CallToolResult, ErrorData> {

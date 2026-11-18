@@ -127,3 +127,8 @@ warning_digest = true
 # url = "https://harms.example.com/hooks/tsmonitor"
 # secret_env = "TSM_WEBHOOK_SECRET"
 # events = ["alert", "report"]
+
+[packages]
+# Socket of the optional root update helper (see deploy/tsmonitor-updater.service). Without the
+# helper the dashboard only lists pending updates; nothing is ever installed by this daemon.
+updater_socket = "/run/tsmonitor-updater/updater.sock"

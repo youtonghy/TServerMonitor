@@ -182,6 +182,11 @@ interface AgentStep {
 | POST (admin) | `/api/v1/settings/notify` body `ChannelInput` | `{ id }` |
 | PATCH / DELETE (admin) | `/api/v1/settings/notify/{id}` | changing the destination (Telegram `api_base`, SMTP host/port/user, webhook URL) of a channel with a stored secret requires `secret` |
 | POST (admin) | `/api/v1/settings/notify/{id}/test` | `{ ok: true }`, or `502` with the delivery error |
+| GET | `/api/v1/packages` | `PackageReport & { updater: { available: boolean; socket: string } }` |
+| POST (admin) | `/api/v1/packages/check` | `PackageReport` (lists again now; never refreshes the index) |
+| GET | `/api/v1/packages/jobs` | `PackageJob[]` (latest 20, without `log`) |
+| GET | `/api/v1/packages/jobs/{id}` | `PackageJob` with `log` |
+| POST (admin) | `/api/v1/packages/jobs` body `{ op: "refresh" \| "upgrade_security" \| "upgrade_all" \| "upgrade_packages"; packages?: string[] }` | `202 { id }`; `400` when the update helper is not installed, a job is running, or a package name is invalid. Output streams as `package_job` events |
 | GET | `/api/v1/tasks` | `{ tasks: Task[]; system: SystemJob[] }` (`system` = fixed `[schedule]` jobs, read-only) |
 | POST (admin) | `/api/v1/tasks` body `TaskInput` (`name`, `trigger`, `prompt_id` required) | `{ id }` |
 | PATCH (admin) | `/api/v1/tasks/{id}` body `TaskInput` | `{ id }` |
@@ -244,6 +249,14 @@ interface AccessStats {
   top_paths: { path: string /* "METHOD /templated/<n>" */; requests: number; s5xx: number }[];
   top_ips: { ip: string; requests: number }[];
 }
+interface PackageReport {
+  checked_at: number | null; managers: ("apt" | "dnf" | "brew")[]; errors: string[]; in_container: boolean;
+  packages: { manager: "apt" | "dnf" | "brew"; name: string; current: string | null; available: string; source: string | null; security: boolean }[];
+}
+interface PackageJob {
+  id: number; op: string; packages: string[]; status: "running" | "succeeded" | "failed" | "unknown";
+  exit_code: number | null; log?: string; started_at: number; finished_at: number | null;
+}
 interface ResolvedModel { provider: string; source: "db" | "config"; api_format: ApiFormat; base_url: string; model: string; auth: AuthStyle; effort: Effort }
 ```
 
@@ -259,6 +272,7 @@ interface ResolvedModel { provider: string; source: "db" | "config"; api_format:
 | `agent_delta` | `{ run_id; conversation_id; text }` streamed reply text of a chat turn (not persisted; the full text arrives as a `message` step) |
 | `report` | `ReportSummary` |
 | `settings` | `{ generation: number }` (runtime settings changed; refetch) |
+| `package_job` | `{ id; status; line: string \| null }` one output line, or a status change when `line` is null |
 
 A `ping` comment is sent every 15 s.
 
@@ -269,7 +283,8 @@ A `ping` comment is sent every 15 s.
 `get_report { id }`, `list_findings`, plus the analysis tools shared with the built-in agent:
 `get_system_status`, `analyze_logs { since_hours?, source? }`, `get_access_stats { window_mins? }`
 (client addresses masked), `get_host_metrics { range }`, `search_log_clusters { source?, level?, query?, since_hours?, limit? }`,
-`list_containers`. All are read-only; the agent's workspace/script tools are not exposed.
+`list_containers`, `list_package_updates`. All are read-only; the agent's workspace/script tools
+are not exposed, and package upgrades are never available over MCP.
 
 ## Outbound webhooks
 

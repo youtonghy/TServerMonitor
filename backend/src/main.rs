@@ -29,6 +29,12 @@ enum Cmd {
     Run,
     /// Validate the config file and exit
     CheckConfig,
+    /// Run the optional package update helper (as root, separate from the daemon)
+    Updater {
+        /// Root-owned helper config (never the daemon's config.toml)
+        #[arg(long, default_value = "/etc/tsmonitor/updater.toml")]
+        updater_config: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -46,6 +52,13 @@ fn main() -> Result<()> {
         )
         .init();
 
+    if let Some(Cmd::Updater { updater_config }) = &cli.cmd {
+        let ucfg = tsmonitor::updater::load_config(updater_config)?;
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(tsmonitor::updater::serve(ucfg));
+    }
     let cfg = config::Config::load(&cli.config)?;
     if matches!(cli.cmd, Some(Cmd::CheckConfig)) {
         println!("config ok: {}", cli.config.display());
@@ -62,6 +75,7 @@ async fn run(cfg: config::Config) -> Result<()> {
     let cfg = Arc::new(cfg);
     let db = store::open(&cfg.storage.data_dir).await?;
     store::close_stale_runs(&db).await?;
+    tsmonitor::updater::close_stale_jobs(&db).await?;
     let state = state::AppState::new(cfg.clone(), db);
 
     let sandbox = Arc::new(sandbox::Sandbox::init(

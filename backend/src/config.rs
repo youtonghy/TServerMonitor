@@ -22,6 +22,23 @@ pub struct Config {
     pub ai: AiConfig,
     pub sandbox: SandboxConfig,
     pub notify: NotifyConfig,
+    pub packages: PackagesConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PackagesConfig {
+    /// Socket of the optional root update helper (`tsmonitor updater`). Updates can only be
+    /// applied from the dashboard when the helper is installed and listening here.
+    pub updater_socket: PathBuf,
+}
+
+impl Default for PackagesConfig {
+    fn default() -> Self {
+        Self {
+            updater_socket: crate::updater::DEFAULT_SOCKET.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

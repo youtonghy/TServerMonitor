@@ -1,0 +1,17 @@
+# Config of the optional package update helper (`tsmonitor updater`), root-owned (0600).
+# It is separate from config.toml on purpose: the monitoring daemon cannot change it.
+
+# Unix socket the daemon connects to; must match [packages] updater_socket in config.toml.
+socket = "/run/tsmonitor-updater/updater.sock"
+
+# Users allowed to connect besides root: the uid of the tsmonitor service user (`id -u tsmonitor`).
+allowed_uids = [999]
+
+# "apt" or "dnf"; detected automatically when omitted.
+# manager = "apt"
+
+# Operations this host permits: refresh | upgrade_security | upgrade_all | upgrade_packages
+allow = ["refresh", "upgrade_security", "upgrade_packages"]
+
+# Print the commands instead of running them. Start with true, check the job logs, then switch.
+dry_run = true

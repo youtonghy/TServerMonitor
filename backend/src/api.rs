@@ -348,6 +348,45 @@ struct AccessQ {
     window: Option<i64>,
 }
 
+async fn get_packages(State(state): State<Shared>) -> ApiResult<Value> {
+    let socket = &state.cfg.packages.updater_socket;
+    let mut v =
+        serde_json::to_value(crate::collect::packages::last()).map_err(anyhow::Error::from)?;
+    v["updater"] = json!({
+        "available": crate::updater::helper_available(socket),
+        "socket": socket,
+    });
+    Ok(Json(v))
+}
+
+async fn get_package_jobs(State(state): State<Shared>) -> ApiResult<Vec<crate::updater::Job>> {
+    Ok(Json(crate::updater::list_jobs(&state.db).await?))
+}
+
+async fn get_package_job(
+    State(state): State<Shared>,
+    Path(id): Path<i64>,
+) -> ApiResult<crate::updater::Job> {
+    crate::updater::get_job(&state.db, id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("job"))
+}
+
+async fn post_package_job(
+    State(state): State<Shared>,
+    Json(req): Json<crate::updater::Request>,
+) -> Result<Response, ApiError> {
+    let id = crate::updater::start_job(&state, req).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))).into_response())
+}
+
+async fn post_packages_check(
+    State(state): State<Shared>,
+) -> ApiResult<crate::collect::packages::PackageReport> {
+    Ok(Json(crate::collect::packages::check(&state).await))
+}
+
 /// Dashboard view of real-time access statistics (client addresses unmasked).
 async fn get_access(State(state): State<Shared>, Query(q): Query<AccessQ>) -> ApiResult<Value> {
     let sources: Vec<&str> = state
@@ -1078,6 +1117,9 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/logs/daily-errors", get(get_daily_errors))
         .route("/api/v1/findings", get(get_findings))
         .route("/api/v1/access", get(get_access))
+        .route("/api/v1/packages", get(get_packages))
+        .route("/api/v1/packages/jobs", get(get_package_jobs))
+        .route("/api/v1/packages/jobs/{id}", get(get_package_job))
         .route("/api/v1/ports", get(get_ports))
         .route("/api/v1/db", get(get_db))
         .route("/api/v1/alerts", get(get_alerts))
@@ -1120,6 +1162,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/tasks", post(post_task))
         .route("/api/v1/tasks/{id}", patch(patch_task).delete(delete_task))
         .route("/api/v1/tasks/{id}/run", post(post_run_task))
+        .route("/api/v1/packages/check", post(post_packages_check))
+        .route("/api/v1/packages/jobs", post(post_package_job))
         .route("/api/v1/alerts/{id}/ack", post(post_alert_ack))
         .route("/api/v1/alerts/{id}/silence", post(post_alert_silence))
         .route("/api/v1/alerts/{id}/close", post(post_alert_close))
