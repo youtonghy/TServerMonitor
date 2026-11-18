@@ -63,10 +63,67 @@ async fn responses(State(log): State<Log>, Json(body): Json<Value>) -> Json<Valu
     }))
 }
 
-async fn messages(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value> {
-    log.lock().unwrap().push(body.clone());
+/// Anthropic-style SSE for streamed (chat) requests: a tool call first, then text in two deltas.
+fn messages_stream(body: &Value) -> axum::response::Response {
+    let ev = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
     let usage = json!({ "input_tokens": 10, "output_tokens": 5 });
-    if !has_tool_result_messages(&body) {
+    let mut out = ev(
+        "message_start",
+        json!({ "type": "message_start", "message": { "id": "msg_s", "type": "message", "role": "assistant", "model": "fake", "content": [], "stop_reason": null, "stop_sequence": null, "usage": usage } }),
+    );
+    let stop = if !has_tool_result_messages(body) {
+        out += &ev(
+            "content_block_start",
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "toolu_s1", "name": "get_host_metrics", "input": {} } }),
+        );
+        out += &ev(
+            "content_block_delta",
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"range\":\"1h\"}" } }),
+        );
+        "tool_use"
+    } else {
+        out += &ev(
+            "content_block_start",
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+        );
+        for part in ["主机运行", "正常。"] {
+            out += &ev(
+                "content_block_delta",
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": part } }),
+            );
+        }
+        "end_turn"
+    };
+    out += &ev(
+        "content_block_stop",
+        json!({ "type": "content_block_stop", "index": 0 }),
+    );
+    out += &ev(
+        "message_delta",
+        json!({ "type": "message_delta", "delta": { "stop_reason": stop, "stop_sequence": null }, "usage": { "output_tokens": 5 } }),
+    );
+    out += &ev("message_stop", json!({ "type": "message_stop" }));
+    axum::response::Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(axum::body::Body::from(out))
+        .unwrap()
+}
+
+async fn messages(State(log): State<Log>, Json(body): Json<Value>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    log.lock().unwrap().push(body.clone());
+    if body["stream"] == true {
+        if body.to_string().contains("请慢慢想") {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        return messages_stream(&body);
+    }
+    messages_json(&body).into_response()
+}
+
+fn messages_json(body: &Value) -> Json<Value> {
+    let usage = json!({ "input_tokens": 10, "output_tokens": 5 });
+    if !has_tool_result_messages(body) {
         return Json(json!({
             "id": "msg_1", "type": "message", "role": "assistant", "model": "fake",
             "content": [{ "type": "tool_use", "id": "toolu_1", "name": "get_host_metrics", "input": { "range": "1h" } }],
@@ -379,4 +436,121 @@ async fn db_provider_with_effort_end_to_end() {
         }
     }
     panic!("run did not finish");
+}
+
+/// Conversation turn streams over SSE, runs tools, keeps history, and runs alongside a scheduled
+/// analysis (separate lanes).
+#[tokio::test]
+async fn chat_streams_and_runs_alongside_background() {
+    if sidecar_path().is_none() {
+        eprintln!("node or built sidecar missing, skipping");
+        return;
+    }
+    let (base_url, log) = fake_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: unique variable name for this test.
+    unsafe { std::env::set_var("TSM_TEST_KEY_CHAT", "chat-key") };
+    let mut cfg = Config::default();
+    cfg.storage.data_dir = dir.path().to_path_buf();
+    cfg.ai.sidecar_path = sidecar_path();
+    cfg.ai.timeout_secs = 60;
+    cfg.ai.profiles = BTreeMap::from([(
+        "default".to_string(),
+        ModelProfile {
+            api_format: ApiFormat::Messages,
+            base_url,
+            model: "fake-model".into(),
+            api_key_env: "TSM_TEST_KEY_CHAT".into(),
+            auth: AuthStyle::ApiKey,
+        },
+    )]);
+    let cfg = Arc::new(cfg);
+    let state = state::AppState::new(cfg.clone(), store::open(dir.path()).await.unwrap());
+    let sb = Arc::new(sandbox::Sandbox::init(dir.path(), cfg.sandbox.clone()).unwrap());
+    let mgr = agent::AgentManager::init(&state, sb).await;
+    state.set_agent(mgr.clone());
+    let mut events = state.events.subscribe();
+
+    store::create_conversation(&state.db, "c_test", "新对话", "chat", None)
+        .await
+        .unwrap();
+    let background = mgr.trigger(ReportKind::Daily, "test").unwrap();
+    let first = mgr.send_message("c_test", "主机怎么样？").await.unwrap();
+    // one run per conversation at a time
+    assert!(matches!(
+        mgr.send_message("c_test", "再说一次").await,
+        Err(agent::TriggerError::Busy(_))
+    ));
+
+    let wait = |id: String| {
+        let db = state.db.clone();
+        async move {
+            for _ in 0..300 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Some((r, steps)) = store::get_run(&db, &id).await.unwrap()
+                    && r.status != "running"
+                {
+                    return (r, steps);
+                }
+            }
+            panic!("run {id} did not finish");
+        }
+    };
+    let (r, steps) = wait(first.clone()).await;
+    assert_eq!(
+        r.status,
+        "succeeded",
+        "{:?} {:#?}",
+        r.error,
+        log.lock().unwrap()
+    );
+    assert_eq!(r.conversation_id.as_deref(), Some("c_test"));
+    assert_eq!(steps[0].kind, "user");
+    assert!(steps.iter().any(|s| s.kind == "tool_call"));
+    assert_eq!(
+        steps
+            .iter()
+            .rev()
+            .find(|s| s.kind == "message")
+            .unwrap()
+            .text
+            .as_deref(),
+        Some("主机运行正常。")
+    );
+    let (b, _) = wait(background).await;
+    assert_eq!(b.status, "succeeded", "{:?}", b.error);
+
+    let mut deltas = String::new();
+    while let Ok(ev) = events.try_recv() {
+        if ev.name() == "agent_delta" {
+            deltas.push_str(ev.data()["text"].as_str().unwrap());
+        }
+    }
+    assert_eq!(deltas, "主机运行正常。");
+
+    // the title follows the first message; the second turn sees the first answer
+    let conv = store::get_conversation(&state.db, "c_test")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(conv.title, "主机怎么样？");
+    let second = mgr.send_message("c_test", "那磁盘呢？").await.unwrap();
+    let (r2, _) = wait(second).await;
+
+    // a stuck request is cancelled without killing the shared sidecar
+    let slow = mgr.send_message("c_test", "请慢慢想").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(mgr.cancel(&slow).await);
+    let started = std::time::Instant::now();
+    let (r3, _) = wait(slow).await;
+    assert_eq!(r3.status, "cancelled");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(r2.status, "succeeded", "{:?}", r2.error);
+    let requests = log.lock().unwrap().clone();
+    let last = requests.iter().rev().find(|r| r["stream"] == true).unwrap();
+    let msgs = last["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["role"], "user");
+    assert!(last.to_string().contains("主机运行正常。"));
+    assert!(last.to_string().contains("那磁盘呢？"));
+    assert!(!requests.iter().any(|r| r.to_string().contains("chat-key")));
 }

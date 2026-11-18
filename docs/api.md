@@ -128,9 +128,11 @@ interface AgentRun {
   status: "running" | "succeeded" | "failed" | "fallback";
   started_at: number; finished_at: number | null; model: string | null;
   steps_count: number; error: string | null; report_id: number | null;
+  conversation_id: string | null;
 }
+// AgentRun.kind is a ReportKind or "chat"; AgentRun.status may also be "cancelled".
 interface AgentStep {
-  seq: number; ts: number; kind: "tool_call" | "tool_result" | "message" | "error";
+  seq: number; ts: number; kind: "user" | "tool_call" | "tool_result" | "message" | "error";
   tool: string | null; input: unknown | null; output: unknown | null; text: string | null;
 }
 ```
@@ -164,6 +166,12 @@ interface AgentStep {
 | PATCH (admin) | `/api/v1/settings/providers/{id}` body `ProviderInput` | `{ id }`; changing `base_url` of a provider with a stored key requires `api_key`; config-file providers are read-only (`400`) |
 | DELETE (admin) | `/api/v1/settings/providers/{id}` | `{ ok: true }`; routes using it are removed |
 | POST (admin) | `/api/v1/settings/models` body `{ provider_id?, api_format?, base_url?, auth?, api_key? }` | `{ models: string[] }` from `{base_url}/models`; a stored key is only sent to the URL it was saved for |
+| GET | `/api/v1/conversations?kind=chat\|task&limit=100` | `Conversation[]` newest activity first |
+| GET | `/api/v1/conversations/{id}` | `Conversation` with `runs: (AgentRun & { steps: AgentStep[] })[]` (oldest first) instead of the count |
+| POST (admin) | `/api/v1/conversations` body `{ title?, context?, message? }` | `201 { id, run_id: string \| null }`; with `message` the first reply starts at once |
+| POST (admin) | `/api/v1/conversations/{id}/messages` body `{ text }` (≤ 8000 chars) | `202 { run_id }`; `409` while this conversation has a running turn or both interactive slots are busy |
+| DELETE (admin) | `/api/v1/conversations/{id}` | `{ ok: true }`; only `kind = "chat"` (scheduled runs are kept with their reports) |
+| POST (admin) | `/api/v1/agent/runs/{id}/cancel` | `{ ok: true }`; `404` when the run is not active |
 | GET | `/api/v1/settings/routing` | `{ kinds: { kind, label, resolved: ResolvedModel \| null }[]; efforts: Effort[]; routes: Route[] }` |
 | PUT (admin) | `/api/v1/settings/routing` body `{ routes: Route[] }` | same as GET; replaces all routes |
 
@@ -179,6 +187,12 @@ interface ProviderInput { name?; api_format?; base_url?; auth?; default_model?; 
 // kind: default | hourly | daily | incident | audit | chat | log_scan | security_check | package_advice | prompt_gen
 // provider: a DB provider id or a config profile name; empty model = provider default
 interface Route { kind: string; provider: string; model: string; effort: Effort }
+// Every agent run belongs to a conversation. Scheduled runs get one each ("c_<run id>");
+// a chat holds one run per user turn. context: one of {report_id} | {alert_id} | {run_id} | {text}.
+interface Conversation {
+  id: string; title: string; kind: string /* "chat" or a report kind */; context: object | null;
+  created_at: number; updated_at: number; last_status: AgentRun["status"] | null; runs: number;
+}
 interface ResolvedModel { provider: string; source: "db" | "config"; api_format: ApiFormat; base_url: string; model: string; auth: AuthStyle; effort: Effort }
 ```
 
@@ -190,7 +204,8 @@ interface ResolvedModel { provider: string; source: "db" | "config"; api_format:
 | `containers` | `ContainerInfo[]` without `history` (every container poll); append one point per event client-side |
 | `alert` | `Alert` (new or updated) |
 | `mode` | `{ mode: Mode; reason: string; since: number }` |
-| `agent` | `{ run_id: string; status: AgentRun["status"]; step: AgentStep \| null }` (`step` null = status change only) |
+| `agent` | `{ run_id: string; conversation_id: string \| null; status: AgentRun["status"]; step: AgentStep \| null }` (`step` null = status change only) |
+| `agent_delta` | `{ run_id; conversation_id; text }` streamed reply text of a chat turn (not persisted; the full text arrives as a `message` step) |
 | `report` | `ReportSummary` |
 | `settings` | `{ generation: number }` (runtime settings changed; refetch) |
 

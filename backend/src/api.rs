@@ -463,11 +463,175 @@ async fn post_trigger(
         .ok_or_else(|| ApiError(StatusCode::SERVICE_UNAVAILABLE, "agent not ready".into()))?;
     match agent.trigger(kind, "manual") {
         Ok(run_id) => Ok((StatusCode::ACCEPTED, Json(json!({ "run_id": run_id }))).into_response()),
-        Err(crate::agent::TriggerError::Busy(id)) => Err(ApiError(
+        Err(e) => Err(trigger_error(e)),
+    }
+}
+
+fn trigger_error(e: crate::agent::TriggerError) -> ApiError {
+    match e {
+        crate::agent::TriggerError::Busy(id) => ApiError(
             StatusCode::CONFLICT,
             format!("analysis {id} is already running"),
-        )),
+        ),
+        crate::agent::TriggerError::NotFound => not_found("conversation"),
     }
+}
+
+fn agent_of(state: &Shared) -> Result<&std::sync::Arc<crate::agent::AgentManager>, ApiError> {
+    state
+        .agent()
+        .ok_or_else(|| ApiError(StatusCode::SERVICE_UNAVAILABLE, "agent not ready".into()))
+}
+
+// ---------------------------------------------------------------- conversations
+
+#[derive(Deserialize)]
+struct ConversationsQ {
+    kind: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn get_conversations(
+    State(state): State<Shared>,
+    Query(q): Query<ConversationsQ>,
+) -> ApiResult<Vec<crate::model::Conversation>> {
+    Ok(Json(
+        store::list_conversations(&state.db, q.kind.as_deref(), q.limit.unwrap_or(100)).await?,
+    ))
+}
+
+async fn get_conversation(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    let conv = store::get_conversation(&state.db, &id)
+        .await?
+        .ok_or_else(|| not_found("conversation"))?;
+    let runs: Vec<Value> = store::conversation_runs(&state.db, &id)
+        .await?
+        .into_iter()
+        .map(|(run, steps)| {
+            let mut v = serde_json::to_value(run).unwrap_or(Value::Null);
+            v["steps"] = json!(steps);
+            v
+        })
+        .collect();
+    let mut v = serde_json::to_value(conv).map_err(anyhow::Error::from)?;
+    v["runs"] = json!(runs);
+    Ok(Json(v))
+}
+
+const MAX_MESSAGE_CHARS: usize = 8000;
+
+fn clean_message(text: &str) -> Result<String, ApiError> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Err(bad_request("消息不能为空"));
+    }
+    if t.chars().count() > MAX_MESSAGE_CHARS {
+        return Err(bad_request(format!(
+            "消息不能超过 {MAX_MESSAGE_CHARS} 个字符"
+        )));
+    }
+    Ok(t.to_string())
+}
+
+/// Accepts exactly one of `report_id`, `alert_id`, `run_id` or `text` (a note such as a package list).
+fn clean_context(ctx: &Value) -> Result<Value, ApiError> {
+    let obj = ctx
+        .as_object()
+        .ok_or_else(|| bad_request("context 必须是对象"))?;
+    let ok = obj.len() == 1
+        && (obj.get("report_id").is_some_and(Value::is_i64)
+            || obj.get("alert_id").is_some_and(Value::is_i64)
+            || obj
+                .get("run_id")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.len() < 100)
+            || obj
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.chars().count() <= 20_000));
+    if !ok {
+        return Err(bad_request(
+            "context 只能包含 report_id、alert_id、run_id 或 text 之一",
+        ));
+    }
+    Ok(ctx.clone())
+}
+
+#[derive(Deserialize)]
+struct NewConversation {
+    title: Option<String>,
+    context: Option<Value>,
+    /// First message; when present the reply starts immediately.
+    message: Option<String>,
+}
+
+async fn post_conversation(
+    State(state): State<Shared>,
+    Json(b): Json<NewConversation>,
+) -> Result<Response, ApiError> {
+    let agent = agent_of(&state)?;
+    let context = b.context.as_ref().map(clean_context).transpose()?;
+    let message = b.message.as_deref().map(clean_message).transpose()?;
+    let title: String = b
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(crate::agent::prompt::NEW_CHAT_TITLE)
+        .chars()
+        .take(60)
+        .collect();
+    let id = format!("c_{}", uuid::Uuid::new_v4().simple());
+    store::create_conversation(&state.db, &id, &title, "chat", context.as_ref()).await?;
+    let run_id = match message {
+        Some(m) => Some(agent.send_message(&id, &m).await.map_err(trigger_error)?),
+        None => None,
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "run_id": run_id })),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct MessageBody {
+    text: String,
+}
+
+async fn post_message(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Json(b): Json<MessageBody>,
+) -> Result<Response, ApiError> {
+    let text = clean_message(&b.text)?;
+    let run_id = agent_of(&state)?
+        .send_message(&id, &text)
+        .await
+        .map_err(trigger_error)?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "run_id": run_id }))).into_response())
+}
+
+async fn delete_conversation(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<Value> {
+    if store::get_conversation(&state.db, &id).await?.is_none() {
+        return Err(not_found("conversation"));
+    }
+    if !store::delete_conversation(&state.db, &id).await? {
+        return Err(bad_request(
+            "只能删除手动发起的对话，定时任务记录会随保留策略清理",
+        ));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn post_cancel(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    if !agent_of(&state)?.cancel(&id).await {
+        return Err(not_found("running run"));
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---------------------------------------------------------------- settings
@@ -700,6 +864,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/stream", get(stream))
         .route("/api/v1/settings/providers", get(get_providers))
         .route("/api/v1/settings/routing", get(get_routing))
+        .route("/api/v1/conversations", get(get_conversations))
+        .route("/api/v1/conversations/{id}", get(get_conversation))
         .nest_service("/mcp", crate::mcp::service(state.clone()));
     let admin = Router::new()
         .route("/api/v1/settings/providers", post(post_provider))
@@ -709,6 +875,13 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/api/v1/settings/models", post(post_models))
         .route("/api/v1/settings/routing", axum::routing::put(put_routing))
+        .route("/api/v1/conversations", post(post_conversation))
+        .route(
+            "/api/v1/conversations/{id}",
+            axum::routing::delete(delete_conversation),
+        )
+        .route("/api/v1/conversations/{id}/messages", post(post_message))
+        .route("/api/v1/agent/runs/{id}/cancel", post(post_cancel))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_admin,

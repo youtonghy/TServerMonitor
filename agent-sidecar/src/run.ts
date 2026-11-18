@@ -1,4 +1,4 @@
-import { generateText, isStepCount, jsonSchema, Output, tool, type ToolSet } from 'ai';
+import { generateText, isStepCount, jsonSchema, Output, streamText, tool, type ToolSet } from 'ai';
 
 import { type RunMessage, send } from './protocol.js';
 import { createModel, providerOptionsFor, reasoningFor } from './providers.js';
@@ -18,7 +18,11 @@ export function resolveToolResult(runId: string, callId: string, output: unknown
   p.resolve(isError ? { error: true, detail: output } : output);
 }
 
+/** Abort handles of active runs, so a cancel stops the model call itself. */
+const controllers = new Map<string, AbortController>();
+
 export function cancelRun(runId: string): void {
+  controllers.get(runId)?.abort(new Error('run cancelled'));
   for (const [key, p] of pending) {
     if (key.startsWith(`${runId}:`)) {
       pending.delete(key);
@@ -35,7 +39,8 @@ function callRust(runId: string, name: string, input: unknown): Promise<unknown>
   });
 }
 
-function buildTools(msg: RunMessage): ToolSet {
+function buildTools(msg: RunMessage): ToolSet | undefined {
+  if (msg.tools.length === 0) return undefined;
   const tools: ToolSet = {};
   for (const def of msg.tools) {
     tools[def.name] = tool({
@@ -110,48 +115,89 @@ export async function withEffort<T>(
 }
 
 export async function runTask(msg: RunMessage): Promise<void> {
+  const controller = new AbortController();
+  controllers.set(msg.run_id, controller);
+  try {
+    if (msg.mode === 'chat') await runChat(msg, controller.signal);
+    else await runStructured(msg, controller.signal);
+  } catch (e) {
+    send({ type: 'error', run_id: msg.run_id, message: controller.signal.aborted ? 'run cancelled' : errorMessage(e) });
+  } finally {
+    controllers.delete(msg.run_id);
+  }
+}
+
+/** Free-text conversation: text deltas stream out as they arrive, tools work as in structured mode. */
+async function runChat(msg: RunMessage, abortSignal: AbortSignal): Promise<void> {
+  const runId = msg.run_id;
+  const model = createModel(msg.model);
+  const tools = buildTools(msg);
+  const result = await withEffort(reasoningFor(msg.model), async (reasoning) => {
+    const r = streamText({
+      model,
+      reasoning,
+      system: msg.system,
+      messages: msg.messages ?? [],
+      tools,
+      stopWhen: isStepCount(msg.max_steps),
+      onStepEnd: (step: { text: string }) => {
+        if (step.text?.trim()) send({ type: 'step', run_id: runId, text: step.text });
+      },
+      providerOptions: providerOptionsFor(msg.model, reasoning),
+      maxRetries: 2,
+      abortSignal,
+    });
+    for await (const part of r.stream) {
+      if (part.type === 'text-delta' && part.text) send({ type: 'delta', run_id: runId, text: part.text });
+      else if (part.type === 'error') throw part.error instanceof Error ? part.error : new Error(String(part.error));
+    }
+    return { text: await r.text, usage: await r.usage };
+  });
+  send({ type: 'result', run_id: runId, output: result.text, usage: result.usage, mode: 'chat' });
+}
+
+async function runStructured(msg: RunMessage, abortSignal: AbortSignal): Promise<void> {
   const runId = msg.run_id;
   const onStepFinish = (step: { text: string }) => {
     if (step.text?.trim()) send({ type: 'step', run_id: runId, text: step.text });
   };
+  const schema = msg.output_schema ?? {};
+  const model = createModel(msg.model);
+  const tools = buildTools(msg);
   try {
-    const model = createModel(msg.model);
-    const tools = buildTools(msg);
-    try {
-      const result = await withEffort(reasoningFor(msg.model), (reasoning) => generateText({
-        model,
-        reasoning,
-        system: msg.system,
-        prompt: msg.prompt,
-        tools,
-        output: Output.object({ schema: jsonSchema(msg.output_schema) }),
-        // +1: producing the structured output is a step of its own
-        stopWhen: isStepCount(msg.max_steps + 1),
-        onStepFinish,
-        providerOptions: providerOptionsFor(msg.model, reasoning),
-        maxRetries: 2,
-      }));
-      send({ type: 'result', run_id: runId, output: result.output, usage: result.totalUsage, mode: 'structured' });
-      return;
-    } catch (e) {
-      if (!isStructuredOutputFailure(e)) throw e;
-      process.stderr.write(`structured output failed (${errorMessage(e)}), retrying in text mode\n`);
-    }
-
-    // Text-mode fallback for endpoints without structured output support.
     const result = await withEffort(reasoningFor(msg.model), (reasoning) => generateText({
       model,
       reasoning,
-      system: `${msg.system}\n\n最终回答只输出一个 JSON 对象，不要输出其他文字。JSON 必须符合以下 JSON Schema：\n${JSON.stringify(msg.output_schema)}`,
-      prompt: msg.prompt,
+      system: msg.system,
+      prompt: msg.prompt ?? '',
       tools,
+      abortSignal,
+      output: Output.object({ schema: jsonSchema(schema) }),
+      // +1: producing the structured output is a step of its own
       stopWhen: isStepCount(msg.max_steps + 1),
       onStepFinish,
       providerOptions: providerOptionsFor(msg.model, reasoning),
       maxRetries: 2,
     }));
-    send({ type: 'result', run_id: runId, output: extractJson(result.text), usage: result.totalUsage, mode: 'text' });
+    send({ type: 'result', run_id: runId, output: result.output, usage: result.usage, mode: 'structured' });
+    return;
   } catch (e) {
-    send({ type: 'error', run_id: runId, message: errorMessage(e) });
+    if (!isStructuredOutputFailure(e)) throw e;
+    process.stderr.write(`structured output failed (${errorMessage(e)}), retrying in text mode\n`);
   }
+
+  // Text-mode fallback for endpoints without structured output support.
+  const result = await withEffort(reasoningFor(msg.model), (reasoning) => generateText({
+    model,
+    reasoning,
+    system: `${msg.system}\n\n最终回答只输出一个 JSON 对象，不要输出其他文字。JSON 必须符合以下 JSON Schema：\n${JSON.stringify(schema)}`,
+    prompt: msg.prompt ?? '',
+    tools,
+    abortSignal,
+    stopWhen: isStepCount(msg.max_steps + 1),
+    onStepFinish,
+    providerOptions: providerOptionsFor(msg.model, reasoning),
+    maxRetries: 2,
+  }));
+  send({ type: 'result', run_id: runId, output: extractJson(result.text), usage: result.usage, mode: 'text' });
 }

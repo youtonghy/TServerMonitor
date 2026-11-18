@@ -24,15 +24,25 @@ export interface ToolDef {
   input_schema: JSONSchema7;
 }
 
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface RunMessage {
   type: 'run';
   run_id: string;
+  /** `structured` (default): produce an object matching `output_schema`. `chat`: stream free text. */
+  mode?: 'structured' | 'chat';
   system: string;
-  prompt: string;
+  /** Structured mode input. */
+  prompt?: string;
+  /** Chat mode history, oldest first, ending with the new user message. */
+  messages?: ChatTurn[];
   model: ModelSpec;
   max_steps: number;
   tools: ToolDef[];
-  output_schema: JSONSchema7;
+  output_schema?: JSONSchema7;
 }
 
 export interface ToolResultMessage {
@@ -49,7 +59,8 @@ export type Outbound =
   | { type: 'ready'; version: string }
   | { type: 'tool_call'; run_id: string; call_id: string; name: string; input: unknown }
   | { type: 'step'; run_id: string; text: string }
-  | { type: 'result'; run_id: string; output: unknown; usage: unknown; mode: 'structured' | 'text' }
+  | { type: 'delta'; run_id: string; text: string }
+  | { type: 'result'; run_id: string; output: unknown; usage: unknown; mode: 'structured' | 'text' | 'chat' }
   | { type: 'error'; run_id: string; message: string };
 
 export function send(msg: Outbound): void {

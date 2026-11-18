@@ -449,6 +449,22 @@ pub struct AgentRun {
     pub steps_count: i64,
     pub error: Option<String>,
     pub report_id: Option<i64>,
+    pub conversation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Conversation {
+    pub id: String,
+    pub title: String,
+    /// "chat" or the task kind of the run that created it.
+    pub kind: String,
+    #[sqlx(json(nullable))]
+    pub context: Option<serde_json::Value>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// Status of the newest run.
+    pub last_status: Option<String>,
+    pub runs: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,8 +487,15 @@ pub enum Event {
     Mode(ModeState),
     Agent {
         run_id: String,
+        conversation_id: Option<String>,
         status: String,
         step: Option<AgentStep>,
+    },
+    /// Streamed text of an interactive run; not persisted (the final text arrives as a step).
+    AgentDelta {
+        run_id: String,
+        conversation_id: String,
+        text: String,
     },
     Report(ReportSummary),
     /// Runtime settings changed; carries no secrets.
@@ -489,6 +512,7 @@ impl Event {
             Self::Alert(_) => "alert",
             Self::Mode(_) => "mode",
             Self::Agent { .. } => "agent",
+            Self::AgentDelta { .. } => "agent_delta",
             Self::Report(_) => "report",
             Self::Settings { .. } => "settings",
         }
@@ -502,9 +526,19 @@ impl Event {
             Self::Mode(m) => serde_json::to_value(m),
             Self::Agent {
                 run_id,
+                conversation_id,
                 status,
                 step,
-            } => Ok(serde_json::json!({ "run_id": run_id, "status": status, "step": step })),
+            } => Ok(
+                serde_json::json!({ "run_id": run_id, "conversation_id": conversation_id, "status": status, "step": step }),
+            ),
+            Self::AgentDelta {
+                run_id,
+                conversation_id,
+                text,
+            } => Ok(
+                serde_json::json!({ "run_id": run_id, "conversation_id": conversation_id, "text": text }),
+            ),
             Self::Report(r) => serde_json::to_value(r),
             Self::Settings { generation } => Ok(serde_json::json!({ "generation": generation })),
         }

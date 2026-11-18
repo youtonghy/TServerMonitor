@@ -18,7 +18,7 @@ pub struct AlertInput<'a> {
 
 const COLS: &str = "id, severity, source, title, summary, suggestion, fingerprint, created_at, last_seen, count, status, notified";
 
-async fn fetch(db: &crate::store::Db, id: i64) -> Result<Alert> {
+pub async fn fetch(db: &crate::store::Db, id: i64) -> Result<Alert> {
     let sql = format!("SELECT {COLS} FROM alerts WHERE id = ?");
     Ok(sqlx::query_as::<_, Alert>(sqlx::AssertSqlSafe(sql))
         .bind(id)

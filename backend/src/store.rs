@@ -8,7 +8,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 
 use crate::model::{
-    AgentRun, AgentStep, Finding, LogCluster, MetricPoint, Report, ReportSummary, now_ms,
+    AgentRun, AgentStep, Conversation, Finding, LogCluster, MetricPoint, Report, ReportSummary,
+    now_ms,
 };
 
 pub type Db = SqlitePool;
@@ -499,19 +500,28 @@ pub async fn get_report(db: &Db, id: Option<i64>, kind: Option<&str>) -> Result<
 
 // ---------------------------------------------------------------- agent runs
 
-pub async fn insert_run(
-    db: &Db,
-    id: &str,
-    trigger: &str,
-    kind: &str,
-    model: Option<&str>,
-) -> Result<()> {
-    sqlx::query("INSERT INTO agent_runs (id, trigger, kind, status, started_at, model) VALUES (?, ?, ?, 'running', ?, ?)")
-        .bind(id)
-        .bind(trigger)
-        .bind(kind)
-        .bind(now_ms())
-        .bind(model)
+pub struct NewRun<'a> {
+    pub id: &'a str,
+    pub trigger: &'a str,
+    pub kind: &'a str,
+    pub model: Option<&'a str>,
+    pub conversation_id: &'a str,
+}
+
+pub async fn insert_run(db: &Db, r: &NewRun<'_>) -> Result<()> {
+    let now = now_ms();
+    sqlx::query("INSERT INTO agent_runs (id, trigger, kind, status, started_at, model, conversation_id) VALUES (?, ?, ?, 'running', ?, ?, ?)")
+        .bind(r.id)
+        .bind(r.trigger)
+        .bind(r.kind)
+        .bind(now)
+        .bind(r.model)
+        .bind(r.conversation_id)
+        .execute(db)
+        .await?;
+    sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(r.conversation_id)
         .execute(db)
         .await?;
     Ok(())
@@ -566,8 +576,7 @@ pub async fn insert_step(db: &Db, run_id: &str, step: &AgentStep) -> Result<()> 
     Ok(())
 }
 
-const RUN_COLS: &str =
-    "id, trigger, kind, status, started_at, finished_at, model, steps_count, error, report_id";
+const RUN_COLS: &str = "id, trigger, kind, status, started_at, finished_at, model, steps_count, error, report_id, conversation_id";
 
 pub async fn list_runs(db: &Db, limit: i64) -> Result<Vec<AgentRun>> {
     let sql = format!("SELECT {RUN_COLS} FROM agent_runs ORDER BY started_at DESC LIMIT ?");
@@ -606,14 +615,125 @@ pub async fn get_run(db: &Db, id: &str) -> Result<Option<(AgentRun, Vec<AgentSte
     Ok(Some((run, steps)))
 }
 
-pub async fn runs_since(db: &Db, since: i64) -> Result<u32> {
+/// Model-backed runs since `since`; `chat` selects the interactive budget, otherwise background.
+pub async fn runs_since(db: &Db, since: i64, chat: bool) -> Result<u32> {
     let n: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM agent_runs WHERE started_at >= ? AND model IS NOT NULL",
+        "SELECT count(*) FROM agent_runs WHERE started_at >= ? AND model IS NOT NULL AND (kind = 'chat') = ?",
     )
     .bind(since)
+    .bind(chat)
     .fetch_one(db)
     .await?;
     Ok(n as u32)
+}
+
+// ---------------------------------------------------------------- conversations
+
+pub async fn create_conversation(
+    db: &Db,
+    id: &str,
+    title: &str,
+    kind: &str,
+    context: Option<&serde_json::Value>,
+) -> Result<()> {
+    let now = now_ms();
+    sqlx::query("INSERT INTO conversations (id, title, kind, context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(id)
+        .bind(title)
+        .bind(kind)
+        .bind(context.map(|c| c.to_string()))
+        .bind(now)
+        .bind(now)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn rename_conversation(db: &Db, id: &str, title: &str) -> Result<()> {
+    sqlx::query("UPDATE conversations SET title = ? WHERE id = ?")
+        .bind(title)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+const CONV_COLS: &str = "c.id, c.title, c.kind, c.context, c.created_at, c.updated_at,
+    (SELECT status FROM agent_runs r WHERE r.conversation_id = c.id ORDER BY r.started_at DESC LIMIT 1) AS last_status,
+    (SELECT count(*) FROM agent_runs r WHERE r.conversation_id = c.id) AS runs";
+
+/// Newest first; `kind` = "chat" for user conversations, "task" for scheduled ones.
+pub async fn list_conversations(
+    db: &Db,
+    kind: Option<&str>,
+    limit: i64,
+) -> Result<Vec<Conversation>> {
+    let filter = match kind {
+        Some("chat") => "WHERE c.kind = 'chat'",
+        Some("task") => "WHERE c.kind <> 'chat'",
+        _ => "",
+    };
+    let sql = format!(
+        "SELECT {CONV_COLS} FROM conversations c {filter} ORDER BY c.updated_at DESC LIMIT ?"
+    );
+    Ok(sqlx::query_as::<_, Conversation>(sqlx::AssertSqlSafe(sql))
+        .bind(limit.clamp(1, 500))
+        .fetch_all(db)
+        .await?)
+}
+
+pub async fn get_conversation(db: &Db, id: &str) -> Result<Option<Conversation>> {
+    let sql = format!("SELECT {CONV_COLS} FROM conversations c WHERE c.id = ?");
+    Ok(sqlx::query_as::<_, Conversation>(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_optional(db)
+        .await?)
+}
+
+/// Runs of a conversation, oldest first, with their steps.
+pub async fn conversation_runs(db: &Db, id: &str) -> Result<Vec<(AgentRun, Vec<AgentStep>)>> {
+    let sql = format!(
+        "SELECT {RUN_COLS} FROM agent_runs WHERE conversation_id = ? ORDER BY started_at, rowid"
+    );
+    let runs = sqlx::query_as::<_, AgentRun>(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_all(db)
+        .await?;
+    let mut out = Vec::with_capacity(runs.len());
+    for r in runs {
+        let steps = get_run(db, &r.id)
+            .await?
+            .map(|(_, s)| s)
+            .unwrap_or_default();
+        out.push((r, steps));
+    }
+    Ok(out)
+}
+
+/// Deletes a chat conversation with its runs and steps. Scheduled ones are kept (reports link to them).
+pub async fn delete_conversation(db: &Db, id: &str) -> Result<bool> {
+    let mut tx = db.begin().await?;
+    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM conversations WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if kind.as_deref() != Some("chat") {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM agent_steps WHERE run_id IN (SELECT id FROM agent_runs WHERE conversation_id = ?)")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM agent_runs WHERE conversation_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM conversations WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------- misc
