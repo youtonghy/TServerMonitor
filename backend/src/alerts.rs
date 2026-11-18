@@ -16,7 +16,10 @@ pub struct AlertInput<'a> {
     pub suggestion: Option<&'a str>,
 }
 
-const COLS: &str = "id, severity, source, title, summary, suggestion, fingerprint, created_at, last_seen, count, status, notified";
+/// (id, severity, notified_at, acked_at, silenced_until) of the open alert for a fingerprint.
+type OpenRow = (i64, String, Option<i64>, Option<i64>, Option<i64>);
+
+const COLS: &str = "id, severity, source, title, summary, suggestion, fingerprint, created_at, last_seen, count, status, notified, acked_at, silenced_until";
 
 pub async fn fetch(db: &crate::store::Db, id: i64) -> Result<Alert> {
     let sql = format!("SELECT {COLS} FROM alerts WHERE id = ?");
@@ -30,13 +33,13 @@ pub async fn fetch(db: &crate::store::Db, id: i64) -> Result<Alert> {
 pub async fn raise(state: &Shared, a: AlertInput<'_>) -> Result<Alert> {
     let db = &state.db;
     let now = now_ms();
-    let existing: Option<(i64, String, Option<i64>)> =
-        sqlx::query_as("SELECT id, severity, notified_at FROM alerts WHERE fingerprint = ? AND status = 'open' ORDER BY id DESC LIMIT 1")
+    let existing: Option<OpenRow> =
+        sqlx::query_as("SELECT id, severity, notified_at, acked_at, silenced_until FROM alerts WHERE fingerprint = ? AND status = 'open' ORDER BY id DESC LIMIT 1")
             .bind(a.fingerprint)
             .fetch_optional(db)
             .await?;
     let (id, should_notify) = match existing {
-        Some((id, sev, notified_at)) => {
+        Some((id, sev, notified_at, acked_at, silenced_until)) => {
             let old = Severity::parse(&sev);
             let new = old.max(a.severity);
             sqlx::query("UPDATE alerts SET severity = ?, last_seen = ?, count = count + 1, summary = ?, suggestion = coalesce(?, suggestion) WHERE id = ?")
@@ -49,12 +52,22 @@ pub async fn raise(state: &Shared, a: AlertInput<'_>) -> Result<Alert> {
                 .await?;
             let cooldown = state.cfg.thresholds.alert_cooldown_mins * 60_000;
             let escalated = new > old;
-            let cooled = notified_at.is_some_and(|t| now - t >= cooldown);
-            (id, escalated || cooled)
+            // acknowledged: only an escalation is worth another message
+            let cooled = acked_at.is_none() && notified_at.is_some_and(|t| now - t >= cooldown);
+            let silenced = silenced_until.is_some_and(|t| t > now);
+            (id, (escalated || cooled) && !silenced)
         }
         None => {
+            // a silence on an earlier alert with the same fingerprint carries over
+            let silenced_until: Option<i64> = sqlx::query_scalar(
+                "SELECT max(silenced_until) FROM alerts WHERE fingerprint = ? AND silenced_until > ?",
+            )
+            .bind(a.fingerprint)
+            .bind(now)
+            .fetch_one(db)
+            .await?;
             let id: i64 = sqlx::query_scalar(
-                "INSERT INTO alerts (fingerprint, severity, source, title, summary, suggestion, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                "INSERT INTO alerts (fingerprint, severity, source, title, summary, suggestion, created_at, last_seen, silenced_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             )
             .bind(a.fingerprint)
             .bind(a.severity.as_str())
@@ -64,6 +77,7 @@ pub async fn raise(state: &Shared, a: AlertInput<'_>) -> Result<Alert> {
             .bind(a.suggestion)
             .bind(now)
             .bind(now)
+            .bind(silenced_until)
             .fetch_one(db)
             .await?;
             tracing::info!(
@@ -72,7 +86,7 @@ pub async fn raise(state: &Shared, a: AlertInput<'_>) -> Result<Alert> {
                 "alert: {}",
                 a.title
             );
-            (id, true)
+            (id, silenced_until.is_none())
         }
     };
     let mut alert = fetch(db, id).await?;
@@ -93,6 +107,39 @@ pub async fn raise_logged(state: &Shared, a: AlertInput<'_>) {
     if let Err(e) = raise(state, a).await {
         tracing::warn!("raising alert: {e:#}");
     }
+}
+
+/// Operator actions from the dashboard or the Telegram bot.
+pub enum Action {
+    Ack,
+    /// Minutes; 0 clears the silence.
+    Silence(i64),
+    Close,
+}
+
+/// Applies an operator action; returns the updated alert, or None if it does not exist.
+pub async fn act(state: &Shared, id: i64, action: Action) -> Result<Option<Alert>> {
+    let now = now_ms();
+    let q = match action {
+        Action::Ack => sqlx::query("UPDATE alerts SET acked_at = coalesce(acked_at, ?) WHERE id = ?")
+            .bind(now)
+            .bind(id),
+        Action::Silence(mins) => sqlx::query("UPDATE alerts SET silenced_until = ? WHERE id = ?")
+            .bind((mins > 0).then(|| now + mins * 60_000))
+            .bind(id),
+        Action::Close => sqlx::query(
+            "UPDATE alerts SET status = 'resolved', last_seen = ?, acked_at = coalesce(acked_at, ?) WHERE id = ?",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(id),
+    };
+    if q.execute(&state.db).await?.rows_affected() == 0 {
+        return Ok(None);
+    }
+    let a = fetch(&state.db, id).await?;
+    state.emit(Event::Alert(a.clone()));
+    Ok(Some(a))
 }
 
 pub async fn resolve(state: &Shared, fingerprint: &str) {

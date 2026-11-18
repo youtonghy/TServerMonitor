@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod alerts;
 pub mod api;
+pub mod channels;
 pub mod collect;
 pub mod config;
 pub mod mcp;
@@ -16,3 +17,4 @@ pub mod settings;
 pub mod state;
 pub mod store;
 pub mod tasks;
+pub mod telegram_bot;

@@ -730,6 +730,107 @@ async fn post_run_task(State(state): State<Shared>, Path(id): Path<String>) -> A
     ))
 }
 
+// ---------------------------------------------------------------- alerts & channels
+
+#[derive(Deserialize, Default)]
+struct SilenceBody {
+    minutes: i64,
+}
+
+async fn alert_action(
+    state: &Shared,
+    id: i64,
+    action: alerts::Action,
+) -> ApiResult<crate::model::Alert> {
+    alerts::act(state, id, action)
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("alert"))
+}
+
+async fn post_alert_ack(
+    State(state): State<Shared>,
+    Path(id): Path<i64>,
+) -> ApiResult<crate::model::Alert> {
+    alert_action(&state, id, alerts::Action::Ack).await
+}
+
+async fn post_alert_close(
+    State(state): State<Shared>,
+    Path(id): Path<i64>,
+) -> ApiResult<crate::model::Alert> {
+    alert_action(&state, id, alerts::Action::Close).await
+}
+
+async fn post_alert_silence(
+    State(state): State<Shared>,
+    Path(id): Path<i64>,
+    Json(b): Json<SilenceBody>,
+) -> ApiResult<crate::model::Alert> {
+    if !(0..=7 * 24 * 60).contains(&b.minutes) {
+        return Err(bad_request("静默时长需在 0 到 7 天之间"));
+    }
+    alert_action(&state, id, alerts::Action::Silence(b.minutes)).await
+}
+
+async fn get_channels(State(state): State<Shared>) -> ApiResult<Value> {
+    let list: Vec<crate::channels::ChannelView> = crate::channels::all(&state)
+        .await
+        .iter()
+        .map(Into::into)
+        .collect();
+    Ok(Json(json!({
+        "channels": list,
+        "key_storage": state.settings.key_storage(),
+    })))
+}
+
+async fn post_channel(
+    State(state): State<Shared>,
+    Json(b): Json<crate::channels::ChannelInput>,
+) -> ApiResult<Value> {
+    let id = crate::channels::create(&state.settings, &state.db, b).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn patch_channel(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Json(b): Json<crate::channels::ChannelInput>,
+) -> ApiResult<Value> {
+    if id.starts_with("config:") {
+        return Err(bad_request("配置文件中的渠道只读，请修改 config.toml"));
+    }
+    if !crate::channels::update(&state.settings, &state.db, &id, b).await? {
+        return Err(not_found("channel"));
+    }
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn delete_channel(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    if id.starts_with("config:") {
+        return Err(bad_request("配置文件中的渠道只读，请修改 config.toml"));
+    }
+    if !crate::channels::delete(&state.db, &id).await? {
+        return Err(not_found("channel"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn post_channel_test(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<Value> {
+    match state.notifier.test(&state, &id).await {
+        Ok(()) => Ok(Json(json!({ "ok": true }))),
+        Err(e) if e.downcast_ref::<crate::settings::Invalid>().is_some() => Err(e.into()),
+        Err(e) => Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            format!("发送失败：{e:#}"),
+        )),
+    }
+}
+
 async fn post_cancel(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     if !agent_of(&state)?.cancel(&id).await {
         return Err(not_found("running run"));
@@ -970,6 +1071,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/conversations", get(get_conversations))
         .route("/api/v1/conversations/{id}", get(get_conversation))
         .route("/api/v1/prompts", get(get_prompts))
+        .route("/api/v1/settings/notify", get(get_channels))
         .route("/api/v1/tasks", get(get_tasks))
         .nest_service("/mcp", crate::mcp::service(state.clone()));
     let admin = Router::new()
@@ -996,6 +1098,15 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/tasks", post(post_task))
         .route("/api/v1/tasks/{id}", patch(patch_task).delete(delete_task))
         .route("/api/v1/tasks/{id}/run", post(post_run_task))
+        .route("/api/v1/alerts/{id}/ack", post(post_alert_ack))
+        .route("/api/v1/alerts/{id}/silence", post(post_alert_silence))
+        .route("/api/v1/alerts/{id}/close", post(post_alert_close))
+        .route("/api/v1/settings/notify", post(post_channel))
+        .route(
+            "/api/v1/settings/notify/{id}",
+            patch(patch_channel).delete(delete_channel),
+        )
+        .route("/api/v1/settings/notify/{id}/test", post(post_channel_test))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_admin,

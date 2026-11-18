@@ -101,6 +101,8 @@ interface Alert {
   id: number; severity: Severity; source: string; title: string; summary: string;
   suggestion: string | null; fingerprint: string; created_at: number; last_seen: number;
   count: number; status: "open" | "resolved"; notified: boolean;
+  acked_at: number | null;        // acknowledged: re-notified only on escalation
+  silenced_until: number | null;  // no notifications until then (carries over to new alerts with the same fingerprint)
 }
 
 interface Diagnosis {
@@ -172,6 +174,13 @@ interface AgentStep {
 | POST (admin) | `/api/v1/conversations/{id}/messages` body `{ text }` (≤ 8000 chars) | `202 { run_id }`; `409` while this conversation has a running turn or both interactive slots are busy |
 | DELETE (admin) | `/api/v1/conversations/{id}` | `{ ok: true }`; only `kind = "chat"` (scheduled runs are kept with their reports) |
 | POST (admin) | `/api/v1/agent/runs/{id}/cancel` | `{ ok: true }`; `404` when the run is not active |
+| POST (admin) | `/api/v1/alerts/{id}/ack` | `Alert` |
+| POST (admin) | `/api/v1/alerts/{id}/silence` body `{ minutes }` (0..10080, 0 clears) | `Alert` |
+| POST (admin) | `/api/v1/alerts/{id}/close` | `Alert` (resolved and acknowledged) |
+| GET | `/api/v1/settings/notify` | `{ channels: NotifyChannel[]; key_storage }` (config-file channels have ids `config:*` and are read-only) |
+| POST (admin) | `/api/v1/settings/notify` body `ChannelInput` | `{ id }` |
+| PATCH / DELETE (admin) | `/api/v1/settings/notify/{id}` | changing the destination (Telegram `api_base`, SMTP host/port/user, webhook URL) of a channel with a stored secret requires `secret` |
+| POST (admin) | `/api/v1/settings/notify/{id}/test` | `{ ok: true }`, or `502` with the delivery error |
 | GET | `/api/v1/tasks` | `{ tasks: Task[]; system: SystemJob[] }` (`system` = fixed `[schedule]` jobs, read-only) |
 | POST (admin) | `/api/v1/tasks` body `TaskInput` (`name`, `trigger`, `prompt_id` required) | `{ id }` |
 | PATCH (admin) | `/api/v1/tasks/{id}` body `TaskInput` | `{ id }` |
@@ -215,6 +224,17 @@ interface Task {
 }
 interface Prompt { id: string; name: string; description: string; body: string; builtin: boolean; route_kind: string; updated_at: number | null }
 // Task runs are reports with kind "custom"; their conversation kind is the task's route_kind.
+type ChannelEvent = "alert" | "report" | "digest";
+interface NotifyChannel {
+  id: string; name: string; kind: "telegram" | "email" | "webhook"; source: "db" | "config"; enabled: boolean;
+  min_severity: Severity; events: ChannelEvent[]; has_secret: boolean;
+  config: { chat_id; api_base; bot_enabled; allowed_user_ids: number[] }          // telegram
+        | { host; port; security: "starttls" | "tls" | "none"; username; from; to: string[] } // email
+        | { url };                                                                 // webhook
+}
+// ChannelInput = Partial<NotifyChannel without id/source/has_secret> & { secret?: string /* write-only */ }
+// Webhooks receive every alert; telegram/email only at or above min_severity. "report" on chat/email
+// channels means the daily report and critical incidents; "digest" is the hourly warning summary.
 interface ResolvedModel { provider: string; source: "db" | "config"; api_format: ApiFormat; base_url: string; model: string; auth: AuthStyle; effort: Effort }
 ```
 

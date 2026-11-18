@@ -273,6 +273,8 @@ pub struct Alert {
     pub count: i64,
     pub status: String,
     pub notified: bool,
+    pub acked_at: Option<i64>,
+    pub silenced_until: Option<i64>,
 }
 
 // ---- AI diagnosis (also the structured-output schema handed to the model) ----

@@ -55,7 +55,7 @@ pub type Shared = Arc<AppState>;
 impl AppState {
     pub fn new(cfg: Arc<Config>, db: Db) -> Shared {
         let (events, _) = broadcast::channel(512);
-        let notifier = Notifier::new(cfg.clone());
+        let notifier = Notifier::new();
         let settings = Settings::new(cfg.clone());
         Arc::new(Self {
             cfg,

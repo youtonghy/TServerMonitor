@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tsmonitor::{agent, api, collect, config, rules, sandbox, schedule, state, store};
+use tsmonitor::{
+    agent, api, collect, config, rules, sandbox, schedule, state, store, telegram_bot,
+};
 
 #[derive(Parser)]
 #[command(
@@ -112,6 +114,7 @@ async fn run(cfg: config::Config) -> Result<()> {
     rules::recompute_mode(&state);
     collect::spawn_all(&state);
     schedule::spawn(&state);
+    telegram_bot::spawn(&state);
 
     let listener = tokio::net::TcpListener::bind(cfg.server.bind)
         .await
