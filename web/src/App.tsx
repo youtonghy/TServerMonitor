@@ -15,7 +15,10 @@ const pages: Record<string, ComponentType> = {
   agent: lazy(() => import('@/pages/agent')),
   tasks: lazy(() => import('@/pages/tasks')),
   settings: lazy(() => import('@/pages/settings')),
+  alerts: lazy(() => import('@/pages/alerts')),
 }
+
+const Wall = lazy(() => import('@/pages/wall'))
 
 function Router() {
   const route = useRoute()
@@ -28,6 +31,17 @@ function Router() {
 }
 
 export default function App() {
+  const route = useRoute()
+  // the wallboard is full-screen, without the navigation shell
+  if (route.segments[0] === 'wall') {
+    return (
+      <LiveProvider>
+        <Suspense fallback={<Skeleton lines={8} label="正在加载大屏" />}>
+          <Wall />
+        </Suspense>
+      </LiveProvider>
+    )
+  }
   return (
     <LiveProvider>
       <AppShell>

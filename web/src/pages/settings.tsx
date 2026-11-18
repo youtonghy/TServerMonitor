@@ -9,6 +9,7 @@ import { api } from "@/api/client";
 import { useStreamEvent } from "@/api/live";
 import type { ApiFormat, AuthStyle, Effort, Provider, ProviderInput, Route, RoutingResponse } from "@/api/types";
 import { useQuery } from "@/api/useQuery";
+import { ChannelsPanel } from "@/components/channels-panel";
 import { PageHeader, Panel, Section, errorMessage } from "@/components/panel";
 import styles from "./pages.module.css";
 import local from "./settings.module.css";
@@ -57,7 +58,7 @@ export default function SettingsPage() {
 
   return (
     <>
-      <PageHeader title="设置" description="模型 Provider 连接，以及每类任务使用的模型与思考强度">
+      <PageHeader title="设置" description="模型 Provider、每类任务使用的模型与思考强度，以及告警通知渠道">
         <Button onClick={() => setEditing("new")}>添加 Provider</Button>
       </PageHeader>
 
@@ -112,6 +113,8 @@ export default function SettingsPage() {
       ) : (
         <Section title="任务路由" query={routing}>{() => null}</Section>
       )}
+
+      <ChannelsPanel />
 
       <ProviderDialog
         key={editing === null ? "closed" : editing === "new" ? "new" : editing.id}

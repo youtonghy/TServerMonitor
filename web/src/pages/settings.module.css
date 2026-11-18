@@ -6,6 +6,20 @@
 .badges { display: flex; flex-wrap: wrap; gap: 6px; }
 .rowActions { display: flex; gap: 8px; }
 
+.filterSelect { min-width: 140px; }
+/* Selects used as compact action menus: keep the label for assistive tech only. */
+.inlineSelect { min-width: 140px; }
+.inlineSelect label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.fieldset { display: grid; gap: 10px; margin: 0; padding: 0; border: 0; }
+.fieldset legend { margin-bottom: 8px; padding: 0; font-weight: 500; }
+
 .modelRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
 
 .routeRow {

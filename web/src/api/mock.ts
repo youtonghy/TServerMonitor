@@ -6,7 +6,7 @@ import type {
   Diagnosis, Finding, HostMetrics, LogCluster, LogRatesResponse, LogSource, MetricPoint, MetricsRange, ModeState,
   PortInfo, Report, ReportKind, ReportSummary, Snapshot, StreamEventMap, StreamEventName,
 } from "./types";
-import type { Conversation, ConversationDetail, Prompt, Provider, ResolvedModel, Route, RoutingResponse, SystemJob, Task } from "./types";
+import type { Conversation, ConversationDetail, NotifyChannel, Prompt, Provider, ResolvedModel, Route, RoutingResponse, SystemJob, Task } from "./types";
 
 const GiB = 1024 ** 3;
 const MiB = 1024 ** 2;
@@ -324,7 +324,7 @@ function dbStatus(): DbStatus[] {
 const alerts: Alert[] = (() => {
   const now = Date.now();
   const make = (id: number, severity: Alert["severity"], source: string, title: string, summary: string, suggestion: string | null, ago: number, count: number, status: Alert["status"] = "open"): Alert =>
-    ({ id, severity, source, title, summary, suggestion, fingerprint: `fp-${id}`, created_at: now - ago, last_seen: now - Math.min(ago, 3 * MIN), count, status, notified: severity !== "info" });
+    ({ id, severity, source, title, summary, suggestion, fingerprint: `fp-${id}`, created_at: now - ago, last_seen: now - Math.min(ago, 3 * MIN), count, status, notified: severity !== "info", acked_at: id === 116 ? now - HOUR : null, silenced_until: null });
   return [
     make(119, "critical", "logs", "php-error 错误率激增", "5 分钟内 PHP 错误从 40/分钟 升至 312/分钟，主要为 PDO 连接被拒绝。", "检查 MySQL 连接数上限与 php-fpm 连接池配置。", 18 * MIN, 64),
     make(118, "critical", "containers", "queue-worker 重启循环", "容器在 30 分钟内重启 47 次，退出码 1。", "检查消息队列 mq:5672 是否可达。", 32 * MIN, 47),
@@ -672,6 +672,21 @@ const systemJobs: SystemJob[] = [
   { id: "system:audit", name: "深度审计", enabled: true, trigger: "空闲窗口 01:00-05:00（CPU < 30%）", prompt_id: "builtin:audit", route_kind: "audit" },
 ];
 
+// Notification channels
+
+const channels: NotifyChannel[] = [
+  { id: "config:telegram", name: "Telegram（配置文件）", kind: "telegram", source: "config", enabled: true, min_severity: "critical", events: ["alert", "report", "digest"], config: { chat_id: "-1001234567", api_base: "https://api.telegram.org", bot_enabled: false, allowed_user_ids: [] }, has_secret: true },
+  { id: "n_mail01", name: "运维邮箱", kind: "email", source: "db", enabled: true, min_severity: "critical", events: ["alert", "digest"], config: { host: "smtp.example.com", port: 587, security: "starttls", username: "monitor@example.com", from: "TServerMonitor <monitor@example.com>", to: ["ops@example.com"] }, has_secret: true },
+];
+
+function alertAction(id: number, patch: Partial<Alert>): Promise<Alert> {
+  const a = alerts.find(x => x.id === id);
+  if (!a) return Promise.reject(new ApiError(404, "alert not found"));
+  Object.assign(a, patch);
+  emit("alert", { ...a });
+  return delay({ ...a });
+}
+
 // API
 
 function snapshot(): Snapshot {
@@ -851,6 +866,31 @@ export const mockApi: Api = {
     return delay({ ok: true as const });
   },
   generatePrompt: description => delay({ body: `任务：${description}。\n1. 查看相关日志源的错误率趋势与主要错误模板；\n2. 结合主机与容器指标判断是否存在资源瓶颈；\n3. 对发现的问题给出根因判断和具体处理建议（命令或配置项）。没有明显问题时简要说明即可。` }, 1500),
+  ackAlert: id => alertAction(id, { acked_at: Date.now() }),
+  silenceAlert: (id, minutes) => alertAction(id, { silenced_until: minutes > 0 ? Date.now() + minutes * MIN : null }),
+  closeAlert: id => alertAction(id, { status: "resolved", acked_at: Date.now() }),
+  channels: () => delay({ channels: channels.map(c => ({ ...c })), key_storage: "file" as const }),
+  createChannel: input => {
+    if (!input.kind || !input.name?.trim() || !input.config) return Promise.reject(new ApiError(400, "名称和配置不能为空"));
+    const id = `n_${Math.random().toString(16).slice(2, 10)}`;
+    channels.push({ id, name: input.name.trim(), kind: input.kind, source: "db", enabled: input.enabled ?? true, min_severity: input.min_severity ?? "critical", events: input.events ?? ["alert", "digest"], config: input.config, has_secret: Boolean(input.secret) });
+    return delay({ id });
+  },
+  updateChannel: (id, input) => {
+    const c = channels.find(x => x.id === id && x.source === "db");
+    if (!c) return Promise.reject(new ApiError(404, "channel not found"));
+    const { secret, ...rest } = input;
+    Object.assign(c, rest);
+    if (secret !== undefined) c.has_secret = secret !== "";
+    return delay({ id });
+  },
+  deleteChannel: id => {
+    const index = channels.findIndex(x => x.id === id && x.source === "db");
+    if (index < 0) return Promise.reject(new ApiError(404, "channel not found"));
+    channels.splice(index, 1);
+    return delay({ ok: true as const });
+  },
+  testChannel: id => (channels.some(c => c.id === id) ? delay({ ok: true as const }, 800) : Promise.reject(new ApiError(404, "channel not found"))),
   cancelRun: runId => {
     const r = runs.find(x => x.run.id === runId && x.run.status === "running");
     if (!r) return Promise.reject(new ApiError(404, "running run not found"));

@@ -1,7 +1,7 @@
 import type {
   Alert, AgentRun, AgentRunDetail, ContainerInfo, Conversation, ConversationDetail, NewConversation, ContainerLogsResponse, DailyErrorCount, DbStatus,
   Finding, LogCluster, LogRatesResponse, LogSource, MetricsRange, MetricsResponse, ModelsRequest, PortInfo,
-  Prompt, PromptInput, ProviderInput, ProvidersResponse, TaskInput, TasksResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
+  ChannelInput, ChannelsResponse, Prompt, PromptInput, ProviderInput, ProvidersResponse, TaskInput, TasksResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
   StatusResponse, TriggerResponse,
 } from "./types";
 
@@ -140,6 +140,14 @@ export interface Api {
   updatePrompt(id: string, input: PromptInput): Promise<{ id: string }>;
   deletePrompt(id: string): Promise<{ ok: true }>;
   generatePrompt(description: string): Promise<{ body: string }>;
+  ackAlert(id: number): Promise<Alert>;
+  silenceAlert(id: number, minutes: number): Promise<Alert>;
+  closeAlert(id: number): Promise<Alert>;
+  channels(): Promise<ChannelsResponse>;
+  createChannel(input: ChannelInput): Promise<{ id: string }>;
+  updateChannel(id: string, input: ChannelInput): Promise<{ id: string }>;
+  deleteChannel(id: string): Promise<{ ok: true }>;
+  testChannel(id: string): Promise<{ ok: true }>;
 }
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -187,6 +195,14 @@ const httpApi: Api = {
   updatePrompt: (id, input) => request(`/prompts/${encodeURIComponent(id)}`, json("PATCH", input)),
   deletePrompt: id => request(`/prompts/${encodeURIComponent(id)}`, { method: "DELETE" }),
   generatePrompt: description => request("/prompts/generate", json("POST", { description })),
+  ackAlert: id => request(`/alerts/${id}/ack`, { method: "POST" }),
+  silenceAlert: (id, minutes) => request(`/alerts/${id}/silence`, json("POST", { minutes })),
+  closeAlert: id => request(`/alerts/${id}/close`, { method: "POST" }),
+  channels: () => request("/settings/notify"),
+  createChannel: input => request("/settings/notify", json("POST", input)),
+  updateChannel: (id, input) => request(`/settings/notify/${encodeURIComponent(id)}`, json("PATCH", input)),
+  deleteChannel: id => request(`/settings/notify/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  testChannel: id => request(`/settings/notify/${encodeURIComponent(id)}/test`, { method: "POST" }),
 };
 
 /**

@@ -79,6 +79,10 @@ export interface Alert {
   id: number; severity: Severity; source: string; title: string; summary: string;
   suggestion: string | null; fingerprint: string; created_at: number; last_seen: number;
   count: number; status: "open" | "resolved"; notified: boolean;
+  /** Acknowledged alerts are only notified again when they escalate. */
+  acked_at: number | null;
+  /** No notifications until this time (also for new alerts with the same fingerprint). */
+  silenced_until: number | null;
 }
 
 export type Confidence = "low" | "medium" | "high";
@@ -220,6 +224,28 @@ export interface Prompt {
   builtin: boolean; route_kind: string; updated_at: number | null;
 }
 export interface PromptInput { name?: string; description?: string; body?: string }
+
+// Notification channels
+
+export type ChannelKind = "telegram" | "email" | "webhook";
+export type ChannelEvent = "alert" | "report" | "digest";
+export interface TelegramConfig { chat_id: string; api_base: string; bot_enabled: boolean; allowed_user_ids: number[] }
+export interface EmailConfig { host: string; port: number; security: "starttls" | "tls" | "none"; username: string; from: string; to: string[] }
+export interface WebhookChannelConfig { url: string }
+export interface NotifyChannel {
+  id: string; name: string; kind: ChannelKind; source: "db" | "config"; enabled: boolean;
+  min_severity: Severity; events: ChannelEvent[];
+  config: TelegramConfig | EmailConfig | WebhookChannelConfig;
+  /** Bot token / SMTP password / webhook signing secret is stored (never returned). */
+  has_secret: boolean;
+}
+export interface ChannelsResponse { channels: NotifyChannel[]; key_storage: KeyStorage }
+export interface ChannelInput {
+  kind?: ChannelKind; name?: string; enabled?: boolean; min_severity?: Severity; events?: ChannelEvent[];
+  config?: TelegramConfig | EmailConfig | WebhookChannelConfig;
+  /** Write-only; empty string clears it. */
+  secret?: string;
+}
 
 // SSE events on /api/v1/stream
 
