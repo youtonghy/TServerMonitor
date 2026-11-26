@@ -480,6 +480,23 @@ async fn get_access(State(state): State<Shared>, Query(q): Query<AccessQ>) -> Ap
     Ok(Json(json!({ "sources": sources, "stats": stats })))
 }
 
+#[derive(Deserialize)]
+struct RangeQ {
+    range: Option<String>,
+}
+
+/// Persisted access history (client addresses unmasked for the dashboard).
+async fn get_access_history(
+    State(state): State<Shared>,
+    Query(q): Query<RangeQ>,
+) -> ApiResult<crate::collect::access::AccessStats> {
+    let range = q.range.unwrap_or_else(|| "24h".into());
+    crate::collect::access_history::history(&state.db, &range, now_ms(), 20, false)
+        .await?
+        .map(Json)
+        .ok_or_else(|| bad_request("range must be 1h, 6h, 24h, 7d or 30d"))
+}
+
 async fn get_findings(
     State(state): State<Shared>,
     Query(q): Query<FindingsQ>,
@@ -1290,6 +1307,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/logs/daily-errors", get(get_daily_errors))
         .route("/api/v1/findings", get(get_findings))
         .route("/api/v1/access", get(get_access))
+        .route("/api/v1/access/history", get(get_access_history))
         .route("/api/v1/packages", get(get_packages))
         .route("/api/v1/packages/jobs", get(get_package_jobs))
         .route("/api/v1/packages/jobs/{id}", get(get_package_job))

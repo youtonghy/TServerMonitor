@@ -395,6 +395,14 @@ async fn flusher(state: Shared) {
             }
             Err(e) => tracing::warn!("flushing log aggregates: {e:#}"),
         }
+        let access = &crate::collect::pipeline().access;
+        let closed = access.drain_closed(now_ms());
+        if !closed.is_empty()
+            && let Err(e) = crate::collect::access_history::store(&state.db, &closed).await
+        {
+            tracing::warn!("storing access history: {e:#}");
+        }
+        rules::on_access(&state, &access.stats(5, now_ms(), 50, false)).await;
     }
 }
 

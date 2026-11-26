@@ -83,6 +83,12 @@ disk_warn = 85
 disk_crit = 95
 sustain_samples = 6
 alert_cooldown_mins = 30
+# nginx access alerts over the last 5 minutes
+access_5xx_warn = 0.05       # share of 5xx responses ...
+access_5xx_crit = 0.2
+access_min_requests = 100    # ... once this many requests were seen
+access_flood_per_min = 600   # one client address above this rate
+access_scan_hits = 20        # scanner probes (/.env, /wp-login.php, ...) from one address
 
 [ai]
 enabled = true
@@ -149,3 +155,12 @@ allow_without_sandbox = false
 # Read-only fallbacks when the helper is not running.
 nginx_root = "/etc/nginx"
 sshd_config = "/etc/ssh/sshd_config"
+
+[journal]
+# Follow the systemd journal (needs the systemd-journal or adm group). Entries at or above
+# max_priority (3 = err, 4 = warning) become the "journal" log source; sshd entries feed the
+# login audit on hosts without /var/log/auth.log.
+enabled = true
+max_priority = 4
+# Units followed at every priority, each as its own source, e.g. ["nginx", "php8.3-fpm"].
+units = []

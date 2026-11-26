@@ -153,6 +153,32 @@ impl McpServer {
         self.shared("get_access_stats", args(&a)).await
     }
 
+    #[tool(
+        description = "Persisted nginx access history over a range (1h, 6h, 24h, 7d, 30d): request series with 4xx/5xx and P95 latency; for ranges up to 24h also latency percentiles, top and slowest paths, hosts, user-agent classes and suspicious (scanning) client addresses, masked.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_access_history(
+        &self,
+        Parameters(a): Parameters<RangeArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::collect::access_history::history(
+            &self.state.db,
+            &a.range,
+            crate::model::now_ms(),
+            15,
+            true,
+        )
+        .await
+        .map_err(internal)?
+        {
+            Some(h) => json_result(&h),
+            None => Err(ErrorData::invalid_params(
+                "range must be 1h, 6h, 24h, 7d or 30d",
+                None,
+            )),
+        }
+    }
+
     #[tool(description = "Host metric statistics (min/avg/max/p95/latest) over a range.")]
     async fn get_host_metrics(
         &self,

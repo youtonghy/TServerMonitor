@@ -24,6 +24,29 @@ pub struct Config {
     pub notify: NotifyConfig,
     pub packages: PackagesConfig,
     pub ops: OpsConfig,
+    pub journal: JournalConfig,
+}
+
+/// systemd journal as a log source (see `collect::journal`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JournalConfig {
+    pub enabled: bool,
+    /// Entries at this syslog priority or more severe go to the `journal` source
+    /// (3 = err, 4 = warning).
+    pub max_priority: u8,
+    /// Units followed completely (every priority), each as its own `journal:<unit>` source.
+    pub units: Vec<String>,
+}
+
+impl Default for JournalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_priority: 4,
+            units: Vec::new(),
+        }
+    }
 }
 
 /// Management through the optional root ops helper (`tsmonitor helper`). What the helper may
@@ -281,6 +304,15 @@ pub struct Thresholds {
     /// Consecutive samples over a threshold before an alert fires.
     pub sustain_samples: u32,
     pub alert_cooldown_mins: i64,
+    /// nginx access, last 5 minutes: 5xx share for a warning / critical alert...
+    pub access_5xx_warn: f64,
+    pub access_5xx_crit: f64,
+    /// ...once at least this many requests were seen.
+    pub access_min_requests: u64,
+    /// One client address above this many requests per minute (5-minute average) is a flood.
+    pub access_flood_per_min: u64,
+    /// Scanner-style probes (/.env, /wp-login.php, ...) from one address within 5 minutes.
+    pub access_scan_hits: u64,
 }
 
 impl Default for Thresholds {
@@ -295,6 +327,11 @@ impl Default for Thresholds {
             disk_crit: 95.0,
             sustain_samples: 6,
             alert_cooldown_mins: 30,
+            access_5xx_warn: 0.05,
+            access_5xx_crit: 0.2,
+            access_min_requests: 100,
+            access_flood_per_min: 600,
+            access_scan_hits: 20,
         }
     }
 }

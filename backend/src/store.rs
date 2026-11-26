@@ -154,6 +154,7 @@ pub async fn apply_retention(db: &Db, raw_days: i64, rollup_days: i64) -> Result
         .bind(now - rollup_days * day)
         .execute(db)
         .await?;
+    crate::collect::access_history::prune(db, now - rollup_days * day).await?;
     sqlx::query("DELETE FROM container_events WHERE ts < ?")
         .bind(now - rollup_days * day)
         .execute(db)

@@ -320,6 +320,16 @@ pub fn sshd_checks(config: &str) -> Vec<Check> {
 
 // ---------------------------------------------------------------- auth log
 
+/// sshd lines from the journal (hosts without an auth log file), drained every minute.
+static JOURNAL_AUTH: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn push_auth_line(line: String) {
+    let mut q = JOURNAL_AUTH.lock().unwrap_or_else(|e| e.into_inner());
+    if q.len() < 20_000 {
+        q.push(line);
+    }
+}
+
 #[derive(Default)]
 pub struct AuthWatch {
     tail: Option<crate::collect::logs::FileTail>,
@@ -529,6 +539,13 @@ pub fn spawn(state: &Shared) {
                 }
             }
             let now = now_ms();
+            if auth.tail.is_none() {
+                let lines =
+                    std::mem::take(&mut *JOURNAL_AUTH.lock().unwrap_or_else(|e| e.into_inner()));
+                for l in lines {
+                    auth.feed(&l, now);
+                }
+            }
             let login = auth.checks(now, state.cfg.security.failed_login_threshold);
             apply(&state, "login", &login).await;
 
@@ -563,12 +580,37 @@ pub fn spawn(state: &Shared) {
                 }
                 apply(&state, "config", &cfg_checks).await;
 
+                let root = state.cfg.ops.nginx_root.clone();
+                if root.join("nginx.conf").is_file() {
+                    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+                    let files = crate::collect::nginx_lint::read_config(&root);
+                    apply(
+                        &state,
+                        "nginx",
+                        &crate::collect::nginx_lint::lint(&files, cpus),
+                    )
+                    .await;
+                }
+                if state
+                    .cfg
+                    .logs
+                    .iter()
+                    .any(|l| l.kind == crate::config::LogKind::NginxAccess)
+                {
+                    let stats = crate::collect::pipeline()
+                        .access
+                        .stats(60, now_ms(), 20, true);
+                    apply(&state, "perf", &crate::collect::nginx_lint::perf(&stats)).await;
+                }
+
                 if state.cfg.security.check_updates {
                     let upd: Vec<Check> = update_checks().await.into_iter().collect();
                     apply(&state, "update", &upd).await;
                 }
-                let detail = if auth_path.is_none() {
+                let detail = if auth_path.is_none() && !state.cfg.journal.enabled {
                     Some("未找到 auth 日志，登录审计已跳过".into())
+                } else if auth_path.is_none() {
+                    Some("未找到 auth 日志，登录审计改用 systemd journal".into())
                 } else {
                     None
                 };

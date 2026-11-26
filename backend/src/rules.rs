@@ -24,6 +24,8 @@ struct RuleState {
     /// source -> last time a burst was seen (ms)
     burst_seen: HashMap<String, i64>,
     last_incident: i64,
+    /// access alert fingerprint -> last time its condition held (ms)
+    access_seen: HashMap<String, i64>,
 }
 
 static RS: LazyLock<Mutex<RuleState>> = LazyLock::new(|| Mutex::new(RuleState::default()));
@@ -279,6 +281,117 @@ pub async fn on_log_checks(state: &Shared, checks: &[BurstCheck]) {
         if fire {
             crate::tasks::on_burst(state, &started.join(",")).await;
         }
+    }
+}
+
+/// An access-log condition that should be alerting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessCond {
+    pub fingerprint: String,
+    pub severity: Severity,
+    pub title: String,
+    pub summary: String,
+    pub suggestion: &'static str,
+}
+
+/// Evaluates the last-5-minutes access statistics (client addresses unmasked).
+pub fn access_conditions(
+    s: &crate::collect::access::AccessStats,
+    t: &crate::config::Thresholds,
+) -> Vec<AccessCond> {
+    let mut out = Vec::new();
+    let mins = s.window_mins.max(1) as u64;
+    if s.requests >= t.access_min_requests && s.error_rate_5xx >= t.access_5xx_warn {
+        let crit = s.error_rate_5xx >= t.access_5xx_crit;
+        let worst = s
+            .top_paths
+            .iter()
+            .filter(|p| p.s5xx > 0)
+            .max_by_key(|p| p.s5xx)
+            .map(|p| format!("；最多的是 {}（{} 次）", p.path, p.s5xx))
+            .unwrap_or_default();
+        out.push(AccessCond {
+            fingerprint: "access:5xx".into(),
+            severity: if crit { Severity::Critical } else { Severity::Warning },
+            title: format!("网站 5xx 比例 {:.1}%", s.error_rate_5xx * 100.0),
+            summary: format!(
+                "最近 {} 分钟 {} 个请求中有 {} 个 5xx{worst}。",
+                s.window_mins, s.requests, s.status[3]
+            ),
+            suggestion: "查看 nginx 错误日志与上游服务状态（容器、PHP-FPM、Node 进程），确认是否刚发布或上游超时。",
+        });
+    }
+    for ip in &s.top_ips {
+        if ip.ip == "(other)" {
+            continue;
+        }
+        if ip.requests / mins >= t.access_flood_per_min {
+            out.push(AccessCond {
+                fingerprint: format!("access:flood:{}", ip.ip),
+                severity: Severity::Warning,
+                title: format!("{} 请求量异常", ip.ip),
+                summary: format!(
+                    "最近 {} 分钟该地址发起 {} 个请求（约 {} 次/分钟，阈值 {}）。",
+                    s.window_mins,
+                    ip.requests,
+                    ip.requests / mins,
+                    t.access_flood_per_min
+                ),
+                suggestion: "确认是否为正常爬虫或内部服务；恶意流量可在防火墙页按来源地址添加拒绝规则，或在 nginx 中配置 limit_req。",
+            });
+        }
+    }
+    for ip in &s.suspicious {
+        if ip.scan >= t.access_scan_hits {
+            out.push(AccessCond {
+                fingerprint: format!("access:scan:{}", ip.ip),
+                severity: Severity::Warning,
+                title: format!("{} 正在扫描敏感路径", ip.ip),
+                summary: format!(
+                    "最近 {} 分钟该地址访问了 {} 次典型扫描路径（如 /.env、/wp-login.php），共 {} 个请求、{} 个 4xx。",
+                    s.window_mins, ip.scan, ip.requests, ip.s4xx
+                ),
+                suggestion: "确认没有敏感文件可被访问；可在防火墙页对该地址添加拒绝规则。",
+            });
+        }
+    }
+    out
+}
+
+/// Raises / refreshes access alerts and resolves those quiet for 5 minutes.
+pub async fn on_access(state: &Shared, stats: &crate::collect::access::AccessStats) {
+    let now = now_ms();
+    let conds = access_conditions(stats, &state.cfg.thresholds);
+    for c in &conds {
+        rs().access_seen.insert(c.fingerprint.clone(), now);
+        alerts::raise_logged(
+            state,
+            AlertInput {
+                severity: c.severity,
+                source: "access",
+                fingerprint: &c.fingerprint,
+                title: &c.title,
+                summary: &c.summary,
+                suggestion: Some(c.suggestion),
+            },
+        )
+        .await;
+    }
+    let quiet: Vec<String> = {
+        let mut r = rs();
+        let q: Vec<String> = r
+            .access_seen
+            .iter()
+            .filter(|(_, t)| now - **t > 5 * 60_000)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &q {
+            r.access_seen.remove(k);
+        }
+        q
+    };
+    for fp in quiet {
+        alerts::resolve(state, &fp).await;
     }
 }
 
@@ -819,6 +932,35 @@ pub fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_alert_conditions() {
+        let a = crate::collect::access::Access::default();
+        let t = 1_700_000_000_000;
+        for i in 0..200 {
+            let status = if i % 4 == 0 { 502 } else { 200 };
+            a.record(
+                &format!(
+                    r#"10.0.0.{} - - [x] "GET /api HTTP/1.1" {status} 1"#,
+                    i % 50
+                ),
+                t,
+            );
+        }
+        for _ in 0..25 {
+            a.record(r#"192.0.2.66 - - [x] "GET /.env HTTP/1.1" 404 0"#, t);
+        }
+        let th = crate::config::Thresholds::default();
+        let c = access_conditions(&a.stats(5, t, 50, false), &th);
+        let fps: Vec<&str> = c.iter().map(|c| c.fingerprint.as_str()).collect();
+        assert!(fps.contains(&"access:5xx"), "{fps:?}");
+        assert!(fps.contains(&"access:scan:192.0.2.66"), "{fps:?}");
+        assert_eq!(c[0].severity, Severity::Critical);
+        assert!(!fps.iter().any(|f| f.starts_with("access:flood")));
+        let quiet = crate::collect::access::Access::default();
+        quiet.record(r#"10.0.0.1 - - [x] "GET / HTTP/1.1" 500 1"#, t);
+        assert!(access_conditions(&quiet.stats(5, t, 50, false), &th).is_empty());
+    }
 
     #[test]
     fn overall_is_dragged_by_worst_dimension() {
