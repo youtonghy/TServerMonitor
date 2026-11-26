@@ -9,6 +9,7 @@ import { api } from "@/api/client";
 import { useStreamEvent } from "@/api/live";
 import type { ApiFormat, AuthStyle, Effort, Provider, ProviderInput, Route, RoutingResponse } from "@/api/types";
 import { useQuery } from "@/api/useQuery";
+import { AccountPanel } from "@/components/account-panel";
 import { ChannelsPanel } from "@/components/channels-panel";
 import { PageHeader, Panel, Section, errorMessage } from "@/components/panel";
 import styles from "./pages.module.css";
@@ -115,6 +116,8 @@ export default function SettingsPage() {
       )}
 
       <ChannelsPanel />
+
+      <AccountPanel />
 
       <ProviderDialog
         key={editing === null ? "closed" : editing === "new" ? "new" : editing.id}

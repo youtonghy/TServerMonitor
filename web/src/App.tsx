@@ -1,6 +1,12 @@
-import { lazy, Suspense, type ComponentType } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ComponentType } from 'react'
 import { Skeleton } from '@/components/arc/skeleton/skeleton'
 import { LiveProvider } from '@/api/live'
+import { api, notifyAuthChange, onUnauthorized } from '@/api/client'
+import type { AuthState } from '@/api/types'
+import { AuthContext } from '@/components/auth-context'
+import { SudoDialog } from '@/components/sudo-dialog'
+import LoginPage from '@/pages/login'
+import SetupPage from '@/pages/setup'
 import { AppShell } from '@/components/app-shell'
 import { NotFound } from '@/pages/not-found'
 import { useRoute } from '@/lib/router'
@@ -35,7 +41,46 @@ function Router() {
   )
 }
 
+const SIGNED_OUT: AuthState = { setup_required: false, authenticated: false, kind: null, user: null, sudo_until: 0 }
+
+/** Setup wizard on first start, then the sign-in page, then the dashboard. */
 export default function App() {
+  const [auth, setAuth] = useState<AuthState | null>(null)
+  const [expired, setExpired] = useState(false)
+
+  const load = useCallback(() => api.authState().then(setAuth, () => setAuth(SIGNED_OUT)), [])
+  useEffect(() => {
+    void load()
+  }, [load])
+  useEffect(() => onUnauthorized(code => {
+    setExpired(code === 'login_required')
+    void load()
+  }), [load])
+
+  const signedIn = useCallback(() => {
+    setExpired(false)
+    void load().then(notifyAuthChange)
+  }, [load])
+  const logout = useCallback(() => {
+    void api.logout().catch(() => undefined).finally(() => {
+      setExpired(false)
+      void load()
+    })
+  }, [load])
+  const info = useMemo(() => ({ user: auth?.user ?? null, logout }), [auth, logout])
+
+  if (!auth) return <Skeleton lines={8} label="正在加载" />
+  if (auth.setup_required) return <SetupPage onDone={signedIn} />
+  if (!auth.authenticated) return <LoginPage onDone={signedIn} expired={expired} />
+  return (
+    <AuthContext.Provider value={info}>
+      <Dashboard />
+      <SudoDialog />
+    </AuthContext.Provider>
+  )
+}
+
+function Dashboard() {
   const route = useRoute()
   // the wallboard is full-screen, without the navigation shell
   if (route.segments[0] === 'wall') {

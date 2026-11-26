@@ -4,117 +4,97 @@ import type {
   AccessResponse, ChannelInput, PackageJob, PackageOp, PackagesResponse, ChannelsResponse, Prompt, PromptInput, ProviderInput, ProvidersResponse, TaskInput, TasksResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
   StatusResponse, TriggerResponse,
   AccessRange, AccessStats, AuditEntry, OpsCapabilities, OpsJob, OpsRead, PendingChange, SshSession,
+  AccountUser, ApiTokenRecord, AuthState, AuthUser, SessionView,
 } from "./types";
 
 export const MOCK = import.meta.env.VITE_MOCK === "1";
 
 const BASE = "/api/v1";
-const TOKEN_KEY = "tsm_token";
 
-/** An HTTP error with the status code and the server's `{ error }` message when present. */
+/** An HTTP error with the status code, the server's `{ error }` message and its `code` when present. */
 export class ApiError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly code: string | null;
+  constructor(status: number, message: string, code: string | null = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
-// Token storage. The token lives in localStorage so the SSE stream and every fetch can read it.
+// Authentication: the browser holds an HttpOnly session cookie; nothing is stored in JS.
 
 type Listener = () => void;
-const tokenListeners = new Set<Listener>();
-const unauthorizedListeners = new Set<Listener>();
+const authListeners = new Set<Listener>();
+const unauthorizedListeners = new Set<(code: string | null) => void>();
 
-export function getToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
+/** Called after sign-in / sign-out, so the stream reconnects and queries reload. */
+export function onAuthChange(listener: Listener): () => void {
+  authListeners.add(listener);
+  return () => authListeners.delete(listener);
 }
 
-export function setToken(token: string | null): void {
-  try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch (error) {
-    console.error("无法保存访问令牌", error);
-  }
-  tokenListeners.forEach(listener => listener());
+export function notifyAuthChange(): void {
+  authListeners.forEach(listener => listener());
 }
 
-/** Called whenever the token changes, so the stream can reconnect and failed queries can retry. */
-export function onTokenChange(listener: Listener): () => void {
-  tokenListeners.add(listener);
-  return () => tokenListeners.delete(listener);
-}
-
-/** Called when any request gets a 401, so the app can ask for a token. */
-export function onUnauthorized(listener: Listener): () => void {
+/** Called when any request gets a 401 (session expired, signed out elsewhere). */
+export function onUnauthorized(listener: (code: string | null) => void): () => void {
   unauthorizedListeners.add(listener);
   return () => unauthorizedListeners.delete(listener);
 }
 
-export function notifyUnauthorized(): void {
-  unauthorizedListeners.forEach(listener => listener());
+export function notifyUnauthorized(code: string | null = null): void {
+  unauthorizedListeners.forEach(listener => listener(code));
 }
 
-// Ops token: kept in memory only (never localStorage, never a URL); re-entered after a reload.
+// Password confirmation ("sudo") for server changes and account management.
 
-let opsToken: string | null = null;
-const opsTokenListeners = new Set<Listener>();
-const opsTokenNeededListeners = new Set<Listener>();
+let sudoHandler: (() => Promise<boolean>) | null = null;
 
-export function getOpsToken(): string | null {
-  return opsToken;
+/** Registered by the sudo dialog; resolves true once the password was confirmed. */
+export function setSudoHandler(handler: (() => Promise<boolean>) | null): void {
+  sudoHandler = handler;
 }
 
-export function setOpsToken(token: string | null): void {
-  opsToken = token;
-  opsTokenListeners.forEach(listener => listener());
-}
-
-export function onOpsTokenChange(listener: Listener): () => void {
-  opsTokenListeners.add(listener);
-  return () => opsTokenListeners.delete(listener);
-}
-
-/** Called when a management request is refused for a missing or wrong ops token. */
-export function onOpsTokenNeeded(listener: Listener): () => void {
-  opsTokenNeededListeners.add(listener);
-  return () => opsTokenNeededListeners.delete(listener);
-}
-
-export function notifyOpsTokenNeeded(): void {
-  opsTokenNeededListeners.forEach(listener => listener());
+/** Runs `fn`; if the server asks for a password confirmation, asks for it once and retries. */
+export async function withSudo<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "sudo_required" && sudoHandler && (await sudoHandler())) return fn();
+    throw error;
+  }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
-  const token = getToken();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
   if (init?.body) headers.set("Content-Type", "application/json");
 
   let response: Response;
   try {
-    response = await fetch(`${BASE}${path}`, { ...init, headers });
+    response = await fetch(`${BASE}${path}`, { ...init, headers, credentials: "same-origin" });
   } catch {
     throw new ApiError(0, "无法连接到服务器，请检查守护进程是否在运行");
   }
 
   if (!response.ok) {
     let message = `请求失败 (${response.status})`;
+    let code: string | null = null;
     try {
       const body: unknown = await response.json();
-      if (body && typeof body === "object" && "error" in body && typeof body.error === "string") message = body.error;
+      if (body && typeof body === "object") {
+        if ("error" in body && typeof body.error === "string") message = body.error;
+        if ("code" in body && typeof body.code === "string") code = body.code;
+      }
     } catch {
       // The body was not JSON; keep the status message.
     }
-    if (response.status === 401) notifyUnauthorized();
-    throw new ApiError(response.status, message);
+    // a wrong password on the login form is not a lost session
+    if (response.status === 401 && code !== "bad_credentials") notifyUnauthorized(code);
+    throw new ApiError(response.status, message, code);
   }
   return (await response.json()) as T;
 }
@@ -193,21 +173,27 @@ export interface Api {
   opsPending(): Promise<PendingChange[]>;
   /** Helper read with local fallback, e.g. opsRead("nginx.file", { path }). */
   opsRead<T>(call: string, params?: Record<string, string>): Promise<OpsRead<T>>;
-  /** Starts a change (needs the ops token); waits up to ~20 s and returns the job. */
+  /** Starts a change (asks for the password when needed); waits up to ~20 s and returns the job. */
   opsRun(call: string, args?: Record<string, unknown>, dryRun?: boolean): Promise<OpsJob>;
   sshSessions(): Promise<SshSession[]>;
+  authState(): Promise<AuthState>;
+  setup(code: string, username: string, password: string): Promise<{ ok: true }>;
+  login(username: string, password: string): Promise<{ user: AuthUser }>;
+  logout(): Promise<{ ok: true }>;
+  sudo(password: string): Promise<{ sudo_until: number }>;
+  changePassword(current: string, next: string): Promise<{ ok: true }>;
+  sessions(): Promise<SessionView[]>;
+  revokeSession(id: string): Promise<{ ok: true }>;
+  users(): Promise<AccountUser[]>;
+  createUser(username: string, password: string): Promise<{ id: number }>;
+  deleteUser(id: number): Promise<{ ok: true }>;
+  tokens(): Promise<ApiTokenRecord[]>;
+  createToken(name: string, scope: "read" | "ops", expiresDays?: number | null): Promise<{ token: string; record: ApiTokenRecord }>;
+  revokeToken(id: number): Promise<{ ok: true }>;
 }
 
-async function opsRun(call: string, args: Record<string, unknown> = {}, dryRun = false): Promise<OpsJob> {
-  const headers: Record<string, string> = {};
-  if (opsToken) headers["X-TSM-Ops-Token"] = opsToken;
-  try {
-    return await request<OpsJob>("/ops/run", { method: "POST", headers, body: JSON.stringify({ call, args, dry_run: dryRun }) });
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 403 && error.message.includes("运维令牌")) notifyOpsTokenNeeded();
-    throw error;
-  }
-}
+const opsRun = (call: string, args: Record<string, unknown> = {}, dryRun = false): Promise<OpsJob> =>
+  withSudo(() => request<OpsJob>("/ops/run", { method: "POST", body: JSON.stringify({ call, args, dry_run: dryRun }) }));
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
 
@@ -277,6 +263,20 @@ const httpApi: Api = {
   opsRead: <T,>(call: string, params: Record<string, string> = {}) => request<OpsRead<T>>(`/ops/read/${encodeURIComponent(call)}${query(params)}`),
   opsRun,
   sshSessions: () => request("/ssh/sessions"),
+  authState: () => request("/auth/state"),
+  setup: (code, username, password) => request("/auth/setup", json("POST", { code, username, password })),
+  login: (username, password) => request("/auth/login", json("POST", { username, password })),
+  logout: () => request("/auth/logout", { method: "POST" }),
+  sudo: password => request("/auth/sudo", json("POST", { password })),
+  changePassword: (current, next) => request("/auth/password", json("POST", { current, new: next })),
+  sessions: () => request("/auth/sessions"),
+  revokeSession: id => request(`/auth/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  users: () => request("/auth/users"),
+  createUser: (username, password) => withSudo(() => request("/auth/users", json("POST", { username, password }))),
+  deleteUser: id => withSudo(() => request(`/auth/users/${id}`, { method: "DELETE" })),
+  tokens: () => request("/auth/tokens"),
+  createToken: (name, scope, expiresDays) => withSudo(() => request("/auth/tokens", json("POST", { name, scope, expires_days: expiresDays ?? null }))),
+  revokeToken: id => withSudo(() => request(`/auth/tokens/${id}`, { method: "DELETE" })),
 };
 
 /**
@@ -293,8 +293,7 @@ function mockApi(): Api {
 
 export const api: Api = import.meta.env.VITE_MOCK === "1" ? mockApi() : httpApi;
 
-/** URL for the shared EventSource. EventSource cannot send headers, so the token goes in the query. */
+/** URL for the shared EventSource (the session cookie authenticates it). */
 export function streamUrl(): string {
-  const token = getToken();
-  return `${BASE}/stream${token ? query({ token }) : ""}`;
+  return `${BASE}/stream`;
 }

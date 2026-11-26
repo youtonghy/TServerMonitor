@@ -1,6 +1,6 @@
 // Mock of the management API (ops helper): stateful enough to click through every page.
 // Never imported by production builds.
-import { ApiError, getOpsToken, notifyOpsTokenNeeded, type Api } from "./client";
+import { ApiError, withSudo, type Api } from "./client";
 import type {
   AccessRange, AccessStats, AuditEntry, DockerImage, DockerInventory, DockerNetwork, DockerVolume, FirewallStatus,
   NginxFile, NginxFileEntry, NginxSites, OpsCapabilities, OpsJob, OpsRead, PendingChange, SshConfig, SshKeys, SshSession,
@@ -14,7 +14,7 @@ const delay = <T,>(value: T, ms = 150 + Math.random() * 250): Promise<T> =>
 
 const caps: OpsCapabilities = {
   available: true, reason: null, version: "0.1.0", dry_run: false, confirm_secs: 120,
-  write_ready: true, write_reason: null, ops_token_env: "TSM_OPS_TOKEN",
+  write_ready: true, write_reason: null,
   domains: {
     docker: { enabled: true, allow: ["start", "stop", "restart", "kill", "remove", "image_pull", "image_remove", "image_prune", "project"] },
     nginx: { enabled: true, allow: ["test", "reload", "site", "edit"] },
@@ -366,6 +366,13 @@ function accessHistory(range: AccessRange): AccessStats {
   };
 }
 
+/** Mock sign-in state shared with the auth mock (sudo window). */
+export const mockAuth = { sudoUntil: 0 };
+
+function needSudo(): void {
+  if (mockAuth.sudoUntil <= Date.now()) throw new ApiError(403, "修改服务器前请先确认密码", "sudo_required");
+}
+
 export function opsMock(emit: Emit): Pick<Api, "accessHistory" | "opsCapabilities" | "opsJobs" | "opsJob" | "opsAudit" | "opsPending" | "opsRead" | "opsRun" | "sshSessions"> {
   return {
     accessHistory: range => delay(accessHistory(range), 300),
@@ -397,16 +404,13 @@ export function opsMock(emit: Emit): Pick<Api, "accessHistory" | "opsCapabilitie
         default: return Promise.reject(new ApiError(400, `不支持的查询 ${call}`));
       }
     },
-    opsRun: async (call, args = {}, dryRun = false) => {
-      if (!getOpsToken()) {
-        notifyOpsTokenNeeded();
-        throw new ApiError(403, "运维令牌无效或缺失（X-TSM-Ops-Token）");
-      }
+    opsRun: (call, args = {}, dryRun = false) => withSudo(async () => {
+      needSudo();
       const id = nextJob++;
       const domain = call.split(".")[0];
       const summary = call;
       const started = Date.now();
-      const job: OpsJob = { id, domain, call, summary, args, dry_run: dryRun, via: "web", remote: "127.0.0.1", status: "running", error: null, result: null, log: "", started_at: started, finished_at: null };
+      const job: OpsJob = { id, domain, call, summary, args, dry_run: dryRun, via: "web", remote: "127.0.0.1", actor: "admin", status: "running", error: null, result: null, log: "", started_at: started, finished_at: null };
       jobs.unshift(job);
       emit("ops_job", { id, status: "running", line: null });
       const out = await apply(emit, call, args, dryRun);
@@ -415,10 +419,10 @@ export function opsMock(emit: Emit): Pick<Api, "accessHistory" | "opsCapabilitie
         emit("ops_job", { id, status: "running", line });
       }
       Object.assign(job, { status: out.error ? "failed" : "succeeded", error: out.error ?? null, result: out.result ?? null, finished_at: Date.now() });
-      audit.unshift({ id, ts: started, via: "web", remote: "127.0.0.1", call, summary, dry_run: dryRun, outcome: out.error ? "failed" : "succeeded", detail: out.error ?? null, job_id: id });
+      audit.unshift({ id, ts: started, via: "web", remote: "127.0.0.1", actor: "admin", call, summary, dry_run: dryRun, outcome: out.error ? "failed" : "succeeded", detail: out.error ?? null, job_id: id });
       emit("ops_job", { id, status: job.status, line: null });
       return delay(job, 400);
-    },
+    }),
     sshSessions: () => delay(sessions),
   };
 }

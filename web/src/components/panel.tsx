@@ -9,7 +9,7 @@ import styles from "./panel.module.css";
 
 export function errorMessage(error: Error): string {
   if (error instanceof ApiError) {
-    if (error.status === 401) return "需要访问令牌。请在弹出的对话框中输入令牌后重试。";
+    if (error.status === 401) return "登录已失效，请重新登录。";
     if (error.status === 0) return error.message;
     if (error.status === 404) return "请求的数据不存在。";
     return `${error.message}（状态码 ${error.status}）`;

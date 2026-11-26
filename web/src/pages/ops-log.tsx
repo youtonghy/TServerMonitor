@@ -37,7 +37,7 @@ export default function OpsLogPage() {
 
   const columns: DataColumn<AuditRow>[] = [
     { key: "ts", label: "时间", sortable: true, render: (_v, r) => <span className={styles.small}>{formatDateTime(r.ts)}</span> },
-    { key: "via", label: "来源", sortable: true, render: (_v, r) => <span className={styles.small}>{r.via === "mcp" ? "外部 Agent" : "面板"}{r.remote ? ` · ${r.remote}` : ""}</span> },
+    { key: "via", label: "来源", sortable: true, render: (_v, r) => <span className={styles.small}>{r.actor ?? "—"} · {r.via === "mcp" ? "MCP" : "面板"}{r.remote ? ` · ${r.remote}` : ""}</span> },
     { key: "summary", label: "操作", render: (_v, r) => <span className={styles.row}><span className={styles.small}>{r.summary}</span>{r.dry_run && <Badge size="sm" tone="neutral" outline>演练</Badge>}</span> },
     { key: "outcome", label: "结果", sortable: true, render: (_v, r) => <Badge size="sm" tone={OUTCOME_TONE[r.outcome]} dot>{OUTCOME_LABEL[r.outcome]}</Badge> },
     { key: "detail", label: "说明", render: (_v, r) => <span className={`${styles.small} ${styles.muted}`}>{r.detail ?? ""}</span> },
@@ -61,7 +61,7 @@ export default function OpsLogPage() {
                       <Badge size="sm" tone={JOB_TONE[j.status]} dot>{JOB_LABEL[j.status]}</Badge>
                     </span>
                     <span className={`${styles.muted} ${styles.small}`}>
-                      {formatRelative(j.started_at, now)} · {j.via === "mcp" ? "外部 Agent" : "面板"}{j.dry_run ? " · 演练" : ""}
+                      {formatRelative(j.started_at, now)} · {j.actor ?? (j.via === "mcp" ? "外部 Agent" : "面板")}{j.dry_run ? " · 演练" : ""}
                     </span>
                   </button>
                 </li>

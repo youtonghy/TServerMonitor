@@ -1,7 +1,7 @@
 // One shared EventSource on /api/v1/stream (or the mock stream), exposed through a context.
 // The store keeps a rolling buffer of the last 360 metric samples for realtime charts.
 import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { getToken, notifyUnauthorized, onTokenChange, streamUrl } from "./client";
+import { notifyUnauthorized, onAuthChange, streamUrl } from "./client";
 import type { ContainerEventItem, HostMetrics, ModeState, StreamEventMap, StreamEventName } from "./types";
 
 export const METRIC_BUFFER = 360;
@@ -77,12 +77,12 @@ class LiveStore {
 
 const LiveContext = createContext<LiveStore | null>(null);
 
-/** Opens the stream once for the whole app and reconnects when the token changes. */
+/** Opens the stream once for the whole app and reconnects after sign-in. */
 export function LiveProvider({ children }: { children: ReactNode }) {
   const [store] = useState(() => new LiveStore());
   const [tokenVersion, setTokenVersion] = useState(0);
 
-  useEffect(() => onTokenChange(() => setTokenVersion(v => v + 1)), []);
+  useEffect(() => onAuthChange(() => setTokenVersion(v => v + 1)), []);
 
   useEffect(() => {
     if (import.meta.env.VITE_MOCK === "1") {
@@ -124,8 +124,8 @@ export function LiveProvider({ children }: { children: ReactNode }) {
         source = null;
         if (disposed) return;
         attempt += 1;
-        // A closed stream with no token often means the daemon wants one; ask once, then keep retrying slowly.
-        if (attempt === 1 && !getToken()) probeAuth();
+        // A closed stream often means the session ended; check once, then keep retrying slowly.
+        if (attempt === 1) probeAuth();
         retry = setTimeout(connect, Math.min(30_000, 2_000 * 2 ** Math.min(attempt, 4)));
       };
       for (const event of EVENTS) {
@@ -152,7 +152,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
 /** EventSource hides the status code, so a cheap request tells whether the stream failed on auth. */
 function probeAuth() {
-  fetch("/api/v1/status", { headers: { Accept: "application/json" } })
+  fetch("/api/v1/status", { headers: { Accept: "application/json" }, credentials: "same-origin" })
     .then(response => {
       if (response.status === 401) notifyUnauthorized();
     })

@@ -26,7 +26,7 @@ export function OpsJobLog({ id }: { id: number }) {
   return (
     <Panel
       title={j?.summary ?? "任务日志"}
-      description={j ? `${formatDateTime(j.started_at)} · 来自 ${j.via === "mcp" ? "外部 Agent（MCP）" : "面板"}${j.remote ? ` · ${j.remote}` : ""}` : undefined}
+      description={j ? `${formatDateTime(j.started_at)} · ${j.actor ?? "未知"} 通过${j.via === "mcp" ? " MCP" : "面板"}${j.remote ? ` · ${j.remote}` : ""}` : undefined}
       actions={j && <span className={styles.resultHead}>{j.dry_run && <Badge size="sm" tone="neutral" outline>演练</Badge>}<Badge size="sm" tone={JOB_TONE[j.status]} dot>{JOB_LABEL[j.status]}</Badge></span>}
     >
       {j?.error && <p className={styles.muted}>{j.error}</p>}

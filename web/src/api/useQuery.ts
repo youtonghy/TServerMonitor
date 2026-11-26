@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type DependencyList } from "react";
-import { onTokenChange } from "./client";
+import { onAuthChange } from "./client";
 
 export type Query<T> =
   | { status: "loading"; data: undefined; error: null; refreshing: boolean; reload: () => void; setData: (update: (prev: T | undefined) => T | undefined) => void }
@@ -11,7 +11,7 @@ interface Inner<T> { data: T | undefined; error: Error | null; pending: boolean 
 /**
  * Runs `fetcher` when `deps` change and on demand. Earlier data stays on screen while a new request is
  * pending (`refreshing`), so changing a filter does not flash a skeleton. Responses that arrive after a
- * newer request started are ignored. Every query reruns when the access token changes.
+ * newer request started are ignored. Every query reruns after sign-in.
  */
 export function useQuery<T>(fetcher: () => Promise<T>, deps: DependencyList, options: { refreshMs?: number } = {}): Query<T> {
   const [inner, setInner] = useState<Inner<T>>({ data: undefined, error: null, pending: true });
@@ -25,7 +25,7 @@ export function useQuery<T>(fetcher: () => Promise<T>, deps: DependencyList, opt
   const reload = useCallback(() => setNonce(n => n + 1), []);
   const setData = useCallback((update: (prev: T | undefined) => T | undefined) => setInner(prev => ({ ...prev, data: update(prev.data) })), []);
 
-  useEffect(() => onTokenChange(reload), [reload]);
+  useEffect(() => onAuthChange(reload), [reload]);
 
   useEffect(() => {
     const id = ++seq.current;

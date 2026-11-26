@@ -1,7 +1,9 @@
 // Development mock (VITE_MOCK=1). Generates data that conforms to docs/api.md and simulates the SSE stream.
 // Never imported by production builds.
 import { ApiError, type Api } from "./client";
-import { opsMock } from "./mock-ops";
+import { mockAuth, opsMock } from "./mock-ops";
+import { withSudo } from "./client";
+import type { AccountUser, ApiTokenRecord, AuthState, SessionView } from "./types";
 import type {
   AgentRun, AgentRunDetail, AgentStep, AiStatus, Alert, ContainerInfo, ContainerLogLine, DailyErrorCount, DbStatus,
   Diagnosis, Finding, HostMetrics, LogCluster, LogRatesResponse, LogSource, MetricPoint, MetricsRange, ModeState,
@@ -755,8 +757,83 @@ function snapshot(): Snapshot {
   };
 }
 
+// Accounts (mock): starts with the setup wizard; any setup code is accepted.
+const mockUsers: (AccountUser & { password: string })[] = [];
+let mockSignedIn: number | null = null;
+const mockTokens: ApiTokenRecord[] = [];
+const mockSessions = (): SessionView[] => [
+  { id: "s-this", created_at: BOOT, last_seen: Date.now(), expires_at: Date.now() + 7 * DAY, remote: "127.0.0.1", user_agent: navigator.userAgent, current: true },
+  { id: "s-phone", created_at: BOOT - DAY, last_seen: Date.now() - 3 * HOUR, expires_at: Date.now() + 5 * DAY, remote: "203.0.113.7", user_agent: "Mozilla/5.0 (iPhone) Safari/605.1", current: false },
+];
+const sudoGate = <T,>(value: T): Promise<T> =>
+  withSudo(() => (mockAuth.sudoUntil > Date.now() ? delay(value) : Promise.reject(new ApiError(403, "此操作需要先确认密码", "sudo_required"))));
+const authApi: Pick<Api, "authState" | "setup" | "login" | "logout" | "sudo" | "changePassword" | "sessions" | "revokeSession" | "users" | "createUser" | "deleteUser" | "tokens" | "createToken" | "revokeToken"> = {
+  authState: () => {
+    const u = mockUsers.find(x => x.id === mockSignedIn);
+    const state: AuthState = { setup_required: mockUsers.length === 0, authenticated: Boolean(u), kind: u ? "session" : null, user: u ? { id: u.id, username: u.username } : null, sudo_until: mockAuth.sudoUntil };
+    return delay(state, 120);
+  },
+  setup: (code, username, password) => {
+    if (!code.trim()) return Promise.reject(new ApiError(400, "setup 码不正确（见服务器上的 setup-code 文件或启动日志）"));
+    if (password.length < 10) return Promise.reject(new ApiError(400, "密码至少 10 位"));
+    mockUsers.push({ id: 1, username, password, created_at: Date.now(), last_login_at: Date.now() });
+    mockSignedIn = 1;
+    return delay({ ok: true as const });
+  },
+  login: (username, password) => {
+    const u = mockUsers.find(x => x.username === username && x.password === password);
+    if (!u) return Promise.reject(new ApiError(401, "用户名或密码不正确", "bad_credentials"));
+    mockSignedIn = u.id;
+    u.last_login_at = Date.now();
+    return delay({ user: { id: u.id, username: u.username } });
+  },
+  logout: () => {
+    mockSignedIn = null;
+    mockAuth.sudoUntil = 0;
+    return delay({ ok: true as const });
+  },
+  sudo: password => {
+    const u = mockUsers.find(x => x.id === mockSignedIn);
+    if (!u || u.password !== password) return Promise.reject(new ApiError(400, "密码不正确"));
+    mockAuth.sudoUntil = Date.now() + 10 * MIN;
+    return delay({ sudo_until: mockAuth.sudoUntil });
+  },
+  changePassword: (current, next) => {
+    const u = mockUsers.find(x => x.id === mockSignedIn);
+    if (!u || u.password !== current) return Promise.reject(new ApiError(400, "当前密码不正确"));
+    u.password = next;
+    return delay({ ok: true as const });
+  },
+  sessions: () => delay(mockSessions()),
+  revokeSession: () => delay({ ok: true as const }),
+  users: () => delay(mockUsers.map(({ password: _p, ...u }) => u)),
+  createUser: (username, password) => sudoGate(null).then(() => {
+    const id = Math.max(0, ...mockUsers.map(u => u.id)) + 1;
+    mockUsers.push({ id, username, password, created_at: Date.now(), last_login_at: null });
+    return { id };
+  }),
+  deleteUser: id => sudoGate(null).then(() => {
+    const i = mockUsers.findIndex(u => u.id === id);
+    if (i >= 0) mockUsers.splice(i, 1);
+    return { ok: true as const };
+  }),
+  tokens: () => delay(mockTokens),
+  createToken: (name, scope, expiresDays) => sudoGate(null).then(() => {
+    const token = `tsm_${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+    const record: ApiTokenRecord = { id: mockTokens.length + 1, name, prefix: token.slice(0, 10), scope, created_at: Date.now(), expires_at: expiresDays ? Date.now() + expiresDays * DAY : null, last_used_at: null, revoked_at: null };
+    mockTokens.unshift(record);
+    return { token, record };
+  }),
+  revokeToken: id => sudoGate(null).then(() => {
+    const t = mockTokens.find(x => x.id === id);
+    if (t) t.revoked_at = Date.now();
+    return { ok: true as const };
+  }),
+};
+
 export const mockApi: Api = {
   ...opsMock(emit),
+  ...authApi,
   status: () => delay({
     version: "0.1.0-dev", platform: "linux-x86_64", started_at: BOOT - 2 * DAY, mode: { ...mode }, ai: { ...ai },
     collectors: {

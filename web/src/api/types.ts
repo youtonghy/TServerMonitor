@@ -322,16 +322,15 @@ export interface OpsCapabilities {
   /** Changes can be submitted (helper + ops token + sandbox isolation). */
   write_ready: boolean; write_reason: string | null;
   domains: Partial<Record<OpsDomain, OpsDomainCaps>>;
-  ops_token_env: string;
 }
 export type OpsJobStatus = "running" | "succeeded" | "failed" | "unknown";
 export interface OpsJob {
   id: number; domain: string; call: string; summary: string; args: unknown; dry_run: boolean;
-  via: "web" | "mcp" | string; remote: string | null; status: OpsJobStatus; error: string | null;
+  via: "web" | "mcp" | string; remote: string | null; actor: string | null; status: OpsJobStatus; error: string | null;
   result: Record<string, unknown> | null; log?: string; started_at: number; finished_at: number | null;
 }
 export interface AuditEntry {
-  id: number; ts: number; via: string; remote: string | null; call: string; summary: string;
+  id: number; ts: number; via: string; remote: string | null; actor: string | null; call: string; summary: string;
   dry_run: boolean; outcome: "started" | "succeeded" | "failed" | "refused"; detail: string | null; job_id: number | null;
 }
 export interface PendingChange { id: string; domain: string; summary: string; created_at: number; deadline: number; via: string }
@@ -374,3 +373,20 @@ export interface SshConfig {
 export interface SshKey { user: string; kind: string; fingerprint: string; comment: string; restricted: boolean }
 export interface SshKeys { users: string[]; keys: SshKey[] }
 export interface SshSession { user: string; tty: string; since: string; from: string | null }
+
+// Accounts and sessions
+
+export interface AuthUser { id: number; username: string }
+export interface AuthState {
+  setup_required: boolean; authenticated: boolean;
+  kind: "session" | "token" | "legacy" | null;
+  user: AuthUser | null;
+  /** Server changes allowed without asking for the password until then (ms). */
+  sudo_until: number;
+}
+export interface AccountUser { id: number; username: string; created_at: number; last_login_at: number | null }
+export interface SessionView { id: string; created_at: number; last_seen: number; expires_at: number; remote: string | null; user_agent: string | null; current: boolean }
+export interface ApiTokenRecord {
+  id: number; name: string; prefix: string; scope: "read" | "ops"; created_at: number;
+  expires_at: number | null; last_used_at: number | null; revoked_at: number | null;
+}

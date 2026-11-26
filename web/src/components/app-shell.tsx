@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { Activity, Bell, Bot, BrickWall, CalendarClock, ClipboardList, Globe, MonitorPlay, PackageCheck, Boxes, FileText, KeyRound, LayoutDashboard, LockKeyhole, ScrollText, Settings, ShieldCheck, Terminal, TrendingUp, type LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
+import { Activity, Bell, Bot, BrickWall, CalendarClock, ClipboardList, Globe, LogOut, MonitorPlay, PackageCheck, Boxes, FileText, LayoutDashboard, ScrollText, Settings, ShieldCheck, Terminal, TrendingUp, type LucideIcon } from "lucide-react";
 import { Badge } from "@/components/arc/badge/badge";
 import { Button } from "@/components/arc/button/button";
 import { ThemeSwitch } from "@/components/arc/theme-switch/theme-switch";
@@ -8,9 +8,8 @@ import { MOCK } from "@/api/client";
 import { useConnection, type ConnectionState } from "@/api/live";
 import { Link, useRoute } from "@/lib/router";
 import { useTheme } from "@/lib/theme";
-import { OpsTokenDialog } from "./ops-token-dialog";
+import { useAuth } from "./auth-context";
 import { PendingBanner } from "./pending-banner";
-import { TokenDialog } from "./token-dialog";
 import styles from "./app-shell.module.css";
 
 interface NavItem { to: string; label: string; icon: LucideIcon; match: string }
@@ -57,8 +56,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const route = useRoute();
   const [theme, setTheme] = useTheme();
   const connection = useConnection();
-  const [tokenOpen, setTokenOpen] = useState(false);
-  const [opsTokenOpen, setOpsTokenOpen] = useState(false);
+  const { user, logout } = useAuth();
   const active = route.segments[0] ?? "";
 
   return (
@@ -97,14 +95,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           {MOCK && <Badge tone="info" size="sm">模拟数据</Badge>}
           <div className={styles.footerTools}>
             <ThemeSwitch theme={theme} iconOnly label={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"} onThemeChange={next => setTheme(next)} />
-            <Tooltip content="访问令牌">
-              <Button variant="ghost" size="sm" aria-label="设置访问令牌" onClick={() => setTokenOpen(true)}>
-                <KeyRound size={16} strokeWidth={1.75} aria-hidden="true" />
-              </Button>
-            </Tooltip>
-            <Tooltip content="运维令牌">
-              <Button variant="ghost" size="sm" aria-label="设置运维令牌" onClick={() => setOpsTokenOpen(true)}>
-                <LockKeyhole size={16} strokeWidth={1.75} aria-hidden="true" />
+            {user && <span className={styles.user} title={`已登录：${user.username}`}>{user.username}</span>}
+            <Tooltip content="退出登录">
+              <Button variant="ghost" size="sm" aria-label="退出登录" onClick={logout}>
+                <LogOut size={16} strokeWidth={1.75} aria-hidden="true" />
               </Button>
             </Tooltip>
           </div>
@@ -116,8 +110,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           {children}
         </div>
       </main>
-      <TokenDialog open={tokenOpen} onOpenChange={setTokenOpen} />
-      <OpsTokenDialog open={opsTokenOpen} onOpenChange={setOpsTokenOpen} />
     </div>
   );
 }

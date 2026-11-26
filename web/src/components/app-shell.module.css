@@ -72,6 +72,15 @@
 }
 
 .footerTools { display: flex; align-items: center; gap: 8px; }
+.user {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .connection {
   display: flex;

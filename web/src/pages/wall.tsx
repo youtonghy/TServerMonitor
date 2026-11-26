@@ -9,7 +9,6 @@ import { api } from "@/api/client";
 import { useConnection, useLiveMetrics, useStreamEvent } from "@/api/live";
 import type { Alert, HostMetrics, MetricPoint, Severity } from "@/api/types";
 import { useQuery } from "@/api/useQuery";
-import { TokenDialog } from "@/components/token-dialog";
 import { formatBytes, formatRate, formatRelative, formatTime, percentOf } from "@/lib/format";
 import { alertSourceLabel, lookup, modeLabel, modeTone, severityLabel, severityTone } from "@/lib/labels";
 import { Link } from "@/lib/router";
@@ -46,7 +45,6 @@ export default function WallPage() {
   const connection = useConnection();
   const snapshot = useQuery(() => api.snapshot(), [], { refreshMs: 30_000 });
   const alerts = useQuery(() => api.alerts("open", 100), [], { refreshMs: 60_000 });
-  const [tokenOpen, setTokenOpen] = useState(false);
   const [full, setFull] = useState(() => Boolean(document.fullscreenElement));
 
   useStreamEvent("alert", alert => {
@@ -106,7 +104,6 @@ export default function WallPage() {
             <Button variant="ghost" size="sm" onClick={toggleFull} aria-label={full ? "退出全屏" : "全屏"}>
               {full ? <Minimize2 size={16} strokeWidth={1.75} aria-hidden="true" /> : <Maximize2 size={16} strokeWidth={1.75} aria-hidden="true" />}
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => setTokenOpen(true)}>令牌</Button>
             <Link to="/">返回</Link>
           </div>
         </header>
@@ -151,7 +148,6 @@ export default function WallPage() {
             </ul>
           )}
       </aside>
-      <TokenDialog open={tokenOpen} onOpenChange={setTokenOpen} />
     </div>
   );
 }
