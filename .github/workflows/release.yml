@@ -51,7 +51,9 @@ jobs:
         run: |
           name=tsmonitor-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}
           mkdir -p "$name"
-          cp target/release/tsmonitor deploy/config.example.toml deploy/tsmonitor.service README.md LICENSE "$name/"
+          cp target/release/tsmonitor deploy/config.example.toml deploy/tsmonitor.service \
+            deploy/tsmonitor-updater.service deploy/updater.example.toml \
+            deploy/tsmonitor-helper.service deploy/helper.example.toml README.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: softprops/action-gh-release@v2

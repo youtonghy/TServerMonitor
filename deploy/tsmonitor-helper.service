@@ -1,0 +1,52 @@
+# OPTIONAL ops helper for TServerMonitor: carries out the nginx, firewall, SSH and Docker changes
+# the operator enabled in /etc/tsmonitor/helper.toml. Without it the dashboard and MCP agents can
+# only LOOK. The monitoring daemon stays unprivileged and talks to it over
+# /run/tsmonitor-helper/helper.sock, presenting a shared secret.
+#
+# Install (as root):
+#   install -m 0600 helper.example.toml /etc/tsmonitor/helper.toml   # set allowed_uids = [$(id -u tsmonitor)]
+#   # one secret shared by both units, and the ops token for the dashboard / MCP (two different values):
+#   echo "TSM_HELPER_SECRET=$(openssl rand -hex 24)" >> /etc/tsmonitor/env
+#   echo "TSM_OPS_TOKEN=$(openssl rand -hex 24)"     >> /etc/tsmonitor/env
+#   cp tsmonitor-helper.service /etc/systemd/system/ && systemctl daemon-reload
+#   systemctl enable --now tsmonitor-helper && systemctl restart tsmonitor
+# Keep dry_run = true in helper.toml until the job logs show exactly what you expect.
+#
+# Unconfirmed firewall/sshd changes are reverted when the helper starts, so keep
+# Restart=on-failure: a crashed helper comes back and rolls them back.
+
+[Unit]
+Description=TServerMonitor ops helper (root, operator-allowed changes only)
+After=network-online.target docker.service nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/tsmonitor helper --helper-config /etc/tsmonitor/helper.toml
+EnvironmentFile=/etc/tsmonitor/env
+RuntimeDirectory=tsmonitor-helper
+RuntimeDirectoryMode=0755
+StateDirectory=tsmonitor-helper
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+
+# Writable: what the enabled domains change, plus backups. Everything else is read-only.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tsmonitor-helper /etc/nginx /etc/ssh /etc/ufw /etc/firewalld /var/log/nginx /run
+# authorized_keys live in home directories (opened with O_NOFOLLOW, owner-checked)
+ProtectHome=no
+PrivateTmp=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# ufw / iptables may load netfilter modules, so ProtectKernelModules is left off on purpose.
+
+[Install]
+WantedBy=multi-user.target

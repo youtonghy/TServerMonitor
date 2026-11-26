@@ -7,6 +7,11 @@
 # Keep the dashboard on loopback. Binding to another address requires TSM_API_TOKEN.
 bind = "127.0.0.1:8787"
 token_env = "TSM_API_TOKEN"
+# Separate token for management (nginx, firewall, SSH, Docker) from the dashboard and from
+# MCP agents on /mcp/ops. Sent only in the X-TSM-Ops-Token header; must differ from TSM_API_TOKEN.
+ops_token_env = "TSM_OPS_TOKEN"
+# Extra Host names the MCP endpoint accepts (loopback always works), e.g. behind a reverse proxy.
+mcp_allowed_hosts = []
 
 [storage]
 data_dir = "/var/lib/tsmonitor"
@@ -132,3 +137,15 @@ warning_digest = true
 # Socket of the optional root update helper (see deploy/tsmonitor-updater.service). Without the
 # helper the dashboard only lists pending updates; nothing is ever installed by this daemon.
 updater_socket = "/run/tsmonitor-updater/updater.sock"
+
+[ops]
+# Socket of the optional ops helper (see deploy/tsmonitor-helper.service). Without the helper,
+# nginx, SSH and Docker are shown read-only where this daemon can see them; nothing is changed.
+helper_socket = "/run/tsmonitor-helper/helper.sock"
+# Env var with the secret shared with the helper (put it in /etc/tsmonitor/env).
+secret_env = "TSM_HELPER_SECRET"
+# Changes are refused while the analysis-script sandbox has no kernel isolation (Landlock).
+allow_without_sandbox = false
+# Read-only fallbacks when the helper is not running.
+nginx_root = "/etc/nginx"
+sshd_config = "/etc/ssh/sshd_config"
