@@ -73,7 +73,7 @@
 docker compose up -d --build        # 打开 http://127.0.0.1:8787，按 setup 向导创建管理员
 ```
 
-- 大屏、REST API、MCP 共用 8787 端口。首次打开会进入 setup 向导，setup 码用 `docker compose exec tsmonitor cat /data/setup-code` 或 `docker compose logs tsmonitor | grep "setup code"` 查看。
+- 大屏、REST API、MCP 共用 8787 端口。首次打开会进入 setup 向导，setup 码用 `docker compose exec tsmonitor cat /var/lib/tsmonitor/setup-code` 或 `docker compose logs tsmonitor | grep "setup code"` 查看。
 - 采集数据存在 `tsmonitor-data` 卷里，`docker compose down -v` 会连数据一起清掉。
 - 容器采集走 `tecnativa/docker-socket-proxy`（只读），不需要把真实套接字交给守护进程。
 - 演示容器 `demo-nginx` + `demo-traffic` 生成真实访问日志，供容器页和日志页展示；不需要可以删掉这两个服务。
