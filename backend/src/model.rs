@@ -511,6 +511,14 @@ pub enum Event {
         status: String,
         line: Option<String>,
     },
+    /// Ops helper job progress: a log line, or a status change when `line` is None.
+    OpsJob {
+        id: i64,
+        status: String,
+        line: Option<String>,
+    },
+    /// Changes waiting for confirmation (the full current list).
+    OpsPending(serde_json::Value),
     /// Runtime settings changed; carries no secrets.
     Settings {
         generation: u64,
@@ -529,6 +537,8 @@ impl Event {
             Self::Report(_) => "report",
             Self::Settings { .. } => "settings",
             Self::PackageJob { .. } => "package_job",
+            Self::OpsJob { .. } => "ops_job",
+            Self::OpsPending(_) => "ops_pending",
         }
     }
 
@@ -555,9 +565,10 @@ impl Event {
             ),
             Self::Report(r) => serde_json::to_value(r),
             Self::Settings { generation } => Ok(serde_json::json!({ "generation": generation })),
-            Self::PackageJob { id, status, line } => {
+            Self::PackageJob { id, status, line } | Self::OpsJob { id, status, line } => {
                 Ok(serde_json::json!({ "id": id, "status": status, "line": line }))
             }
+            Self::OpsPending(v) => Ok(v.clone()),
         }
         .unwrap_or(serde_json::Value::Null)
     }

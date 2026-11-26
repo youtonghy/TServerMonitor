@@ -271,10 +271,17 @@ async fn handle(
     // the job runs on even if the client goes away; output goes to the client while it listens
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
     let job_cfg = cfg.clone();
+    /// Clears the busy flag even if the job panics.
+    struct Release(Arc<AtomicBool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
     tokio::spawn(async move {
+        let _release = Release(busy);
         let done = run_job(manager, &req, job_cfg.dry_run, &tx).await;
         let _ = tx.send(done);
-        busy.store(false, Ordering::SeqCst);
     });
     while let Some(v) = rx.recv().await {
         if w.write_all(reply(v).as_bytes()).await.is_err() {

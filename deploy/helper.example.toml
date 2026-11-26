@@ -1,0 +1,67 @@
+# Config of the OPTIONAL ops helper (`tsmonitor helper`), root-owned (install -m 0600).
+# The monitoring daemon cannot change this file. Every domain is OFF until `enabled = true`,
+# and an enabled domain is READ-ONLY until operations are listed in its `allow`.
+#
+# Root-equivalent operations are marked below. Anyone holding the ops token (TSM_OPS_TOKEN)
+# can use whatever you allow here, from the dashboard and from MCP agents.
+
+# Unix socket the daemon connects to; must match [ops] helper_socket in config.toml.
+socket = "/run/tsmonitor-helper/helper.sock"
+
+# Users allowed to connect besides root: the uid of the tsmonitor service user (`id -u tsmonitor`).
+allowed_uids = [999]
+
+# The daemon must also present this shared secret (>= 16 chars). Put the same
+# TSM_HELPER_SECRET=... line in /etc/tsmonitor/env, which both units read.
+secret_env = "TSM_HELPER_SECRET"
+
+# Backups of every file the helper changes, and records of changes awaiting confirmation.
+state_dir = "/var/lib/tsmonitor-helper"
+
+# Log what would happen instead of changing anything. Start with true, check the job logs,
+# then switch to false.
+dry_run = true
+
+# Firewall and sshd changes are reverted unless confirmed in the dashboard within this window.
+# Confirm only after you opened a NEW ssh session successfully.
+confirm_secs = 120
+
+[docker]
+enabled = false
+socket = "/var/run/docker.sock"
+# start | stop | restart | kill | remove | image_pull | image_remove | image_prune | project
+# | volume_remove | volume_prune
+# ROOT-EQUIVALENT in practice: whoever controls containers controls the host.
+allow = []
+# Containers that may only be started (the socket proxy and TServerMonitor are always protected).
+protected = []
+
+[nginx]
+enabled = false
+# test | reload | site | edit
+# `edit` is ROOT-EQUIVALENT: nginx loads its config as root. Obvious escapes (load_module,
+# user, perl/js/lua, log paths outside /var/log, ...) are refused, but treat it as root access.
+allow = []
+root = "/etc/nginx"
+edit_dirs = ["conf.d", "sites-available", "snippets"]
+binary = "nginx"
+# Fetched after every reload; a 5xx, timeout or connection error rolls the change back.
+# probe_url = "http://127.0.0.1/"
+
+[firewall]
+enabled = false
+# Detected when omitted: ufw, then firewalld, then nftables, then iptables (read-only).
+# backend = "ufw"
+# add_rule | delete_rule | toggle (ufw enable/disable)
+allow = []
+# firewalld zone; the default zone when omitted.
+# zone = "public"
+
+[ssh]
+enabled = false
+# options | key_add | key_remove
+allow = []
+# sshd_config must `Include /etc/ssh/sshd_config.d/*.conf` before any Match block.
+dropin = "/etc/ssh/sshd_config.d/00-tsmonitor.conf"
+sshd_config = "/etc/ssh/sshd_config"
+sshd_binary = "sshd"

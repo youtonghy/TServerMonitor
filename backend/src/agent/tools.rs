@@ -1,6 +1,10 @@
 //! Tools exposed to the model. Two kinds only:
-//! 1. read-only queries over collected data;
+//! 1. read-only queries over collected data, including the server-management inventory
+//!    (nginx, firewall, SSH, Docker; secrets redacted);
 //! 2. workspace tools (export a redacted log sample, write a script, run it in the sandbox).
+//!
+//! The built-in agent never gets write tools: changes are only made from the dashboard or by
+//! an external agent on `/mcp/ops`.
 //!
 //! Tool execution happens here in Rust; the Node sidecar only forwards calls.
 
@@ -162,6 +166,20 @@ pub fn definitions() -> Vec<Value> {
                 "script": { "type": "string", "description": "如 scripts/analyze.py" },
                 "args": { "type": "array", "items": { "type": "string" }, "maxItems": 16 }
             }, "required": ["script"], "additionalProperties": false }
+        }),
+        json!({
+            "name": "get_ops_inventory",
+            "description": "服务器管理面的只读信息（通过运维助手或本机只读访问获得，敏感值已打码）。what：docker_containers（容器与 compose 项目）、docker_images、nginx_sites（站点、域名、监听端口）、firewall（防火墙后端、规则、SSH 端口）、ssh_config（sshd 生效配置）、ssh_keys（各用户公钥指纹）、ops_jobs（最近的管理操作记录）。",
+            "input_schema": { "type": "object", "properties": {
+                "what": { "type": "string", "enum": ["docker_containers", "docker_images", "nginx_sites", "firewall", "ssh_config", "ssh_keys", "ops_jobs"] }
+            }, "required": ["what"], "additionalProperties": false }
+        }),
+        json!({
+            "name": "get_nginx_file",
+            "description": "读取一个 nginx 配置文件（相对 nginx 根目录的路径，如 sites-available/shop 或 nginx.conf），敏感值已替换为 <redacted>。适合分析配置问题与优化建议。",
+            "input_schema": { "type": "object", "properties": {
+                "path": { "type": "string" }
+            }, "required": ["path"], "additionalProperties": false }
         }),
         json!({
             "name": "list_workspace",
@@ -448,6 +466,54 @@ pub async fn execute(ctx: &ToolCtx<'_>, name: &str, input: &Value) -> Result<Val
             json!(ctx.sandbox.run_python(&a.script, &a.args).await?)
         }
         "list_workspace" => json!(ctx.sandbox.list()),
+        "get_ops_inventory" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                what: String,
+            }
+            let a: A = parse(input)?;
+            let call = match a.what.as_str() {
+                "docker_containers" => "docker.containers",
+                "docker_images" => "docker.images",
+                "nginx_sites" => "nginx.sites",
+                "firewall" => "firewall.status",
+                "ssh_config" => "ssh.config",
+                "ssh_keys" => "ssh.keys",
+                "ops_jobs" => {
+                    return Ok(cap(json!(
+                        crate::ops::list_jobs(&state.db, None, 20).await?
+                    )));
+                }
+                other => bail!("unknown inventory {other}"),
+            };
+            let mut v = crate::ops::read(state, call, json!({}))
+                .await
+                .map_err(|e| anyhow::anyhow!(e.message))?;
+            if let Some(keys) = v["data"]["keys"].as_array_mut() {
+                for k in keys {
+                    if let Some(c) = k["comment"].as_str() {
+                        k["comment"] = crate::preprocess::redact(c).into();
+                    }
+                }
+            }
+            v
+        }
+        "get_nginx_file" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                path: String,
+            }
+            let a: A = parse(input)?;
+            let mut v = crate::ops::read(state, "nginx.file", json!({ "path": a.path }))
+                .await
+                .map_err(|e| anyhow::anyhow!(e.message))?;
+            if let Some(c) = v["data"]["content"].as_str() {
+                v["data"]["content"] = crate::ops::redact_config(c).into();
+            }
+            v
+        }
         other => bail!("unknown tool {other}"),
     };
     Ok(cap(out))

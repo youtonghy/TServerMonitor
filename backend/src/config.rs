@@ -23,6 +23,35 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     pub notify: NotifyConfig,
     pub packages: PackagesConfig,
+    pub ops: OpsConfig,
+}
+
+/// Management through the optional root ops helper (`tsmonitor helper`). What the helper may
+/// actually do is decided by its own root-owned config, not here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpsConfig {
+    pub helper_socket: PathBuf,
+    /// Env var with the secret shared with the helper (same value in both units' env).
+    pub secret_env: String,
+    /// Allow changes even when the analysis-script sandbox has no kernel isolation. Without
+    /// isolation an AI-written script running as the daemon user could try to reach the helper.
+    pub allow_without_sandbox: bool,
+    /// Used for read-only views when the helper is not running.
+    pub nginx_root: PathBuf,
+    pub sshd_config: PathBuf,
+}
+
+impl Default for OpsConfig {
+    fn default() -> Self {
+        Self {
+            helper_socket: crate::ops::proto::DEFAULT_SOCKET.into(),
+            secret_env: "TSM_HELPER_SECRET".into(),
+            allow_without_sandbox: false,
+            nginx_root: "/etc/nginx".into(),
+            sshd_config: "/etc/ssh/sshd_config".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +76,12 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     /// Name of the env var holding the API bearer token.
     pub token_env: String,
+    /// Name of the env var holding the separate ops token. Changes to nginx, the firewall, SSH
+    /// and Docker (web and MCP) require it in the `X-TSM-Ops-Token` header, never in a URL.
+    pub ops_token_env: String,
+    /// Extra `Host` values accepted by the MCP endpoint (loopback is always accepted), e.g.
+    /// `["monitor.example.com"]` when an agent connects through a reverse proxy.
+    pub mcp_allowed_hosts: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -54,6 +89,8 @@ impl Default for ServerConfig {
         Self {
             bind: "127.0.0.1:8787".parse().expect("valid default addr"),
             token_env: "TSM_API_TOKEN".into(),
+            ops_token_env: "TSM_OPS_TOKEN".into(),
+            mcp_allowed_hosts: Vec::new(),
         }
     }
 }
@@ -461,6 +498,21 @@ impl Config {
                 self.server.bind,
                 self.server.token_env
             );
+        }
+        if let Some(ops) = secret(&self.server.ops_token_env) {
+            if ops.len() < 16 {
+                bail!(
+                    "{} must be at least 16 characters",
+                    self.server.ops_token_env
+                );
+            }
+            if secret(&self.server.token_env).as_deref() == Some(ops.as_str()) {
+                bail!(
+                    "{} must differ from {}",
+                    self.server.ops_token_env,
+                    self.server.token_env
+                );
+            }
         }
         parse_hhmm(&self.schedule.daily_at).context("schedule.daily_at")?;
         parse_window(&self.schedule.idle_window).context("schedule.idle_window")?;

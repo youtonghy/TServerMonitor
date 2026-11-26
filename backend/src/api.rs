@@ -37,11 +37,29 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl From<crate::ops::proto::OpError> for ApiError {
+    fn from(e: crate::ops::proto::OpError) -> Self {
+        use crate::ops::proto::ErrorCode as C;
+        let status = match e.code {
+            C::Unauthorized | C::NotAllowed => StatusCode::FORBIDDEN,
+            C::Invalid => StatusCode::BAD_REQUEST,
+            C::Busy | C::Conflict => StatusCode::CONFLICT,
+            C::Unsupported => StatusCode::SERVICE_UNAVAILABLE,
+            C::Failed => StatusCode::BAD_GATEWAY,
+        };
+        ApiError(status, e.message)
+    }
+}
+
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         if let Some(inv) = e.downcast_ref::<crate::settings::Invalid>() {
             return ApiError(StatusCode::BAD_REQUEST, inv.0.clone());
         }
+        let e = match e.downcast::<crate::ops::proto::OpError>() {
+            Ok(op) => return op.into(),
+            Err(e) => e,
+        };
         tracing::error!("api error: {e:#}");
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
     }
@@ -104,6 +122,65 @@ async fn require_admin(State(state): State<Shared>, req: Request, next: Next) ->
         return ApiError(StatusCode::FORBIDDEN, "cross-origin request refused".into())
             .into_response();
     }
+    next.run(req).await
+}
+
+/// Client address for the audit log: the TCP peer, or the first X-Forwarded-For hop when the
+/// peer is a local reverse proxy.
+#[derive(Clone)]
+pub struct RemoteAddr(pub Option<String>);
+
+pub fn remote_of(req: &Request) -> Option<String> {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+    let fwd = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    match (peer, fwd) {
+        (Some(p), Some(f)) if p.is_loopback() => Some(f),
+        (Some(p), _) => Some(p.to_string()),
+        (None, f) => f,
+    }
+}
+
+/// Management routes (web and `/mcp/ops`): the separate ops token must be configured and sent
+/// in `X-TSM-Ops-Token`; browsers must not call cross-origin. The regular API token is still
+/// checked by [`auth`] in front of this.
+pub async fn require_ops(State(state): State<Shared>, mut req: Request, next: Next) -> Response {
+    let Some(expected) = crate::config::secret(&state.cfg.server.ops_token_env) else {
+        return ApiError(
+            StatusCode::FORBIDDEN,
+            format!(
+                "管理操作需要先设置运维令牌（环境变量 {}）",
+                state.cfg.server.ops_token_env
+            ),
+        )
+        .into_response();
+    };
+    if !same_origin(req.headers()) {
+        return ApiError(StatusCode::FORBIDDEN, "cross-origin request refused".into())
+            .into_response();
+    }
+    let given = req
+        .headers()
+        .get("x-tsm-ops-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if !ct_eq(given.as_bytes(), expected.as_bytes()) {
+        return ApiError(
+            StatusCode::FORBIDDEN,
+            "运维令牌无效或缺失（X-TSM-Ops-Token）".into(),
+        )
+        .into_response();
+    }
+    let remote = remote_of(&req);
+    req.extensions_mut().insert(RemoteAddr(remote));
     next.run(req).await
 }
 
@@ -1059,11 +1136,107 @@ async fn stream(
     )
 }
 
+// ---------------------------------------------------------------- ops (helper-mediated management)
+
+async fn get_ops_caps(State(state): State<Shared>) -> ApiResult<crate::ops::Capabilities> {
+    Ok(Json(crate::ops::capabilities(&state).await))
+}
+
+#[derive(Deserialize)]
+struct OpsJobsQ {
+    domain: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn get_ops_jobs(
+    State(state): State<Shared>,
+    Query(q): Query<OpsJobsQ>,
+) -> ApiResult<Vec<crate::ops::Job>> {
+    Ok(Json(
+        crate::ops::list_jobs(&state.db, q.domain.as_deref(), q.limit.unwrap_or(30)).await?,
+    ))
+}
+
+async fn get_ops_job(
+    State(state): State<Shared>,
+    Path(id): Path<i64>,
+) -> ApiResult<crate::ops::Job> {
+    crate::ops::get_job(&state.db, id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("job"))
+}
+
+async fn get_ops_audit(
+    State(state): State<Shared>,
+    Query(q): Query<LimitQ>,
+) -> ApiResult<Vec<crate::ops::AuditEntry>> {
+    Ok(Json(
+        crate::ops::list_audit(&state.db, q.limit.unwrap_or(100)).await?,
+    ))
+}
+
+async fn get_ops_pending(State(state): State<Shared>) -> ApiResult<Value> {
+    Ok(Json(crate::ops::pending(&state).await))
+}
+
+/// `GET /api/v1/ops/read/{call}?path=...`: helper read with local fallback.
+async fn get_ops_read(
+    State(state): State<Shared>,
+    Path(call): Path<String>,
+    Query(q): Query<std::collections::BTreeMap<String, String>>,
+) -> ApiResult<Value> {
+    let args = json!(q);
+    Ok(Json(crate::ops::read(&state, &call, args).await?))
+}
+
+async fn get_ssh_sessions() -> ApiResult<Value> {
+    Ok(Json(json!(crate::ops::sessions().await)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpsRun {
+    call: String,
+    #[serde(default)]
+    args: Value,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Starts a change and waits briefly for it; long jobs come back with `status = running` and
+/// continue over the `ops_job` SSE event.
+async fn post_ops_run(
+    State(state): State<Shared>,
+    axum::Extension(remote): axum::Extension<RemoteAddr>,
+    Json(r): Json<OpsRun>,
+) -> ApiResult<crate::ops::Job> {
+    let summary = crate::ops::calls::summary(&r.call, &r.args);
+    let id = crate::ops::submit(
+        &state,
+        crate::ops::Submit {
+            call: r.call,
+            args: r.args,
+            dry_run: r.dry_run,
+            summary,
+            via: crate::ops::Via {
+                via: "web",
+                remote: remote.0,
+            },
+        },
+    )
+    .await?;
+    crate::ops::wait(&state, id, Duration::from_secs(20))
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("job"))
+}
+
 // ---------------------------------------------------------------- static dashboard
 
 async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
     let path = uri.path().trim_start_matches('/');
-    if path.starts_with("api/") || path == "mcp" {
+    if path.starts_with("api/") || path == "mcp" || path.starts_with("mcp/") {
         return ApiError(StatusCode::NOT_FOUND, "not found".into()).into_response();
     }
     let (file, name) = match WebAsset::get(path).filter(|_| !path.is_empty()) {
@@ -1137,7 +1310,21 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/prompts", get(get_prompts))
         .route("/api/v1/settings/notify", get(get_channels))
         .route("/api/v1/tasks", get(get_tasks))
-        .nest_service("/mcp", crate::mcp::service(state.clone()));
+        .route("/api/v1/ops/capabilities", get(get_ops_caps))
+        .route("/api/v1/ops/jobs", get(get_ops_jobs))
+        .route("/api/v1/ops/jobs/{id}", get(get_ops_job))
+        .route("/api/v1/ops/audit", get(get_ops_audit))
+        .route("/api/v1/ops/pending", get(get_ops_pending))
+        .route("/api/v1/ops/read/{call}", get(get_ops_read))
+        .route("/api/v1/ssh/sessions", get(get_ssh_sessions))
+        .nest_service("/mcp", crate::mcp::service(state.clone(), false));
+    let ops = Router::new()
+        .route("/api/v1/ops/run", post(post_ops_run))
+        .nest_service("/mcp/ops", crate::mcp::service(state.clone(), true))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_ops,
+        ));
     let admin = Router::new()
         .route("/api/v1/settings/providers", post(post_provider))
         .route(
@@ -1178,6 +1365,7 @@ pub fn router(state: Shared) -> Router {
             require_admin,
         ));
     api.merge(admin)
+        .merge(ops)
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth))
         .fallback(static_handler)
         .with_state(state)
@@ -1363,5 +1551,278 @@ mod tests {
             .unwrap_or_default();
         assert!(text.contains("203.0.113.x"), "{call}");
         assert!(!text.contains("203.0.113.9"));
+    }
+
+    async fn mcp_tools(c: &reqwest::Client, url: &str, ops: Option<&str>) -> (u16, Vec<String>) {
+        let mut req = c
+            .post(url)
+            .header("accept", "application/json, text/event-stream")
+            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } } }));
+        if let Some(t) = ops {
+            req = req.header("x-tsm-ops-token", t);
+        }
+        let r = req.send().await.unwrap();
+        let status = r.status().as_u16();
+        let Some(sid) = r
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+        else {
+            return (status, vec![]);
+        };
+        let send = |body: Value| {
+            let mut q = c
+                .post(url)
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-session-id", &sid)
+                .json(&body);
+            if let Some(t) = ops {
+                q = q.header("x-tsm-ops-token", t);
+            }
+            q.send()
+        };
+        let _ = send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .await
+            .unwrap();
+        let text = send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let body = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .find(|l| l.starts_with('{'))
+            .map(str::to_string)
+            .unwrap_or(text);
+        let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        let names = v["result"]["tools"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (status, names)
+    }
+
+    #[tokio::test]
+    async fn ops_routes_and_mcp_ops_need_the_ops_token() {
+        // SAFETY: unique variable names for this test.
+        unsafe { std::env::set_var("TSM_TEST_OPS_TOKEN_A", "ops-token-0123456789") };
+        let mut cfg = crate::config::Config::default();
+        cfg.server.token_env = "TSM_TEST_API_TOKEN_UNSET".into();
+        cfg.server.ops_token_env = "TSM_TEST_OPS_TOKEN_A".into();
+        cfg.ops.helper_socket = "/nonexistent/helper.sock".into();
+        let state = crate::state::AppState::new(
+            std::sync::Arc::new(cfg),
+            crate::store::open_memory().await,
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, router(state)).await.unwrap() });
+        let c = reqwest::Client::new();
+        let run = |tok: Option<&'static str>, body: Value| {
+            let mut r = c.post(format!("{base}/api/v1/ops/run")).json(&body);
+            if let Some(t) = tok {
+                r = r.header("x-tsm-ops-token", t);
+            }
+            r.send()
+        };
+        let body =
+            json!({ "call": "docker.container", "args": { "id": "web", "action": "restart" } });
+        assert_eq!(run(None, body.clone()).await.unwrap().status(), 403);
+        assert_eq!(
+            run(Some("wrong-token-xxxxxxxx"), body.clone())
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        // valid token but no helper: refused with the reason, and audited
+        let r = run(Some("ops-token-0123456789"), body.clone())
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+        assert!(r.text().await.unwrap().contains("运维助手"));
+        let audit: Value = c
+            .get(format!("{base}/api/v1/ops/audit"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(audit[0]["outcome"], "refused");
+        // reads are not writes
+        let r = run(
+            Some("ops-token-0123456789"),
+            json!({ "call": "docker.images" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 400);
+        let caps: Value = c
+            .get(format!("{base}/api/v1/ops/capabilities"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(caps["available"], false);
+        assert_eq!(caps["write_ready"], false);
+
+        // MCP: write tools never appear on /mcp, only on /mcp/ops behind the token
+        let (_, read) = mcp_tools(&c, &format!("{base}/mcp"), None).await;
+        assert!(read.contains(&"firewall_status".to_string()), "{read:?}");
+        for w in [
+            "docker_container_action",
+            "nginx_write_file",
+            "firewall_rule_add",
+            "ssh_set_options",
+            "revert_change",
+        ] {
+            assert!(!read.contains(&w.to_string()), "{w} exposed on /mcp");
+        }
+        assert!(!read.iter().any(|n| n == "confirm_change"));
+        let (status, none) = mcp_tools(&c, &format!("{base}/mcp/ops"), None).await;
+        assert_eq!(status, 403);
+        assert!(none.is_empty());
+        let (_, ops) =
+            mcp_tools(&c, &format!("{base}/mcp/ops"), Some("ops-token-0123456789")).await;
+        assert!(ops.contains(&"nginx_write_file".to_string()), "{ops:?}");
+        assert!(ops.contains(&"firewall_status".to_string()));
+        assert!(!ops.iter().any(|n| n.contains("confirm")));
+    }
+
+    #[tokio::test]
+    async fn mcp_requires_api_token_when_configured() {
+        unsafe { std::env::set_var("TSM_TEST_API_TOKEN_MCP", "api-token-x") };
+        let base = serve("TSM_TEST_API_TOKEN_MCP").await;
+        let r = reqwest::Client::new()
+            .post(format!("{base}/mcp"))
+            .header("accept", "application/json, text/event-stream")
+            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn ops_end_to_end_through_a_real_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("nginx-root");
+        std::fs::create_dir_all(root.join("conf.d")).unwrap();
+        std::fs::write(
+            root.join("conf.d/app.conf"),
+            "server { listen 80; server_name app; }",
+        )
+        .unwrap();
+        let bin = dir.path().join("fake-nginx");
+        std::fs::write(&bin, "#!/bin/sh\necho 'syntax is ok' >&2\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let me = unsafe { libc::getuid() };
+        let mut hcfg: crate::helper::HelperConfig =
+            toml::from_str(&format!("allowed_uids = [{me}]")).unwrap();
+        hcfg.nginx.enabled = true;
+        hcfg.nginx.root = root.clone();
+        hcfg.nginx.binary = bin.to_string_lossy().into_owned();
+        hcfg.nginx.allow = vec![
+            crate::helper::config::NginxOp::Site,
+            crate::helper::config::NginxOp::Test,
+        ];
+        let (socket, _hdir) = crate::helper::tests::spawn_helper(hcfg).await;
+
+        unsafe { std::env::set_var("TSM_TEST_OPS_TOKEN_E2E", "ops-token-e2e-0123456") };
+        let mut cfg = crate::config::Config::default();
+        cfg.server.token_env = "TSM_TEST_API_TOKEN_UNSET".into();
+        cfg.server.ops_token_env = "TSM_TEST_OPS_TOKEN_E2E".into();
+        cfg.ops.helper_socket = socket;
+        cfg.ops.secret_env = "TSM_TEST_HELPER_SECRET".into();
+        cfg.ops.allow_without_sandbox = true;
+        let state = crate::state::AppState::new(
+            std::sync::Arc::new(cfg),
+            crate::store::open_memory().await,
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, router(state)).await.unwrap() });
+        let c = reqwest::Client::new();
+
+        let caps: Value = c
+            .get(format!("{base}/api/v1/ops/capabilities"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(caps["available"], true, "{caps}");
+        assert_eq!(caps["write_ready"], true, "{caps}");
+        let sites: Value = c
+            .get(format!("{base}/api/v1/ops/read/nginx.sites"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(sites["source"], "helper");
+        assert_eq!(sites["data"]["sites"][0]["enabled"], true);
+
+        let job: Value = c
+            .post(format!("{base}/api/v1/ops/run"))
+            .header("x-tsm-ops-token", "ops-token-e2e-0123456")
+            .json(&json!({ "call": "nginx.site", "args": { "name": "app", "enabled": false } }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(job["status"], "succeeded", "{job}");
+        assert!(
+            job["log"].as_str().unwrap().contains("nginx -t")
+                || job["log"].as_str().unwrap().contains("fake-nginx"),
+            "{job}"
+        );
+        assert!(root.join("conf.d/app.conf.disabled").exists());
+
+        // an operation the helper does not allow
+        let r = c
+            .post(format!("{base}/api/v1/ops/run"))
+            .header("x-tsm-ops-token", "ops-token-e2e-0123456")
+            .json(&json!({ "call": "nginx.reload" }))
+            .send()
+            .await
+            .unwrap();
+        let job: Value = r.json().await.unwrap();
+        assert_eq!(job["status"], "failed");
+        assert!(job["error"].as_str().unwrap().contains("未允许"), "{job}");
+
+        let audit: Value = c
+            .get(format!("{base}/api/v1/ops/audit"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let outcomes: Vec<&str> = audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a["outcome"].as_str())
+            .collect();
+        assert_eq!(outcomes, ["failed", "succeeded"]);
+        assert_eq!(audit[1]["via"], "web");
     }
 }

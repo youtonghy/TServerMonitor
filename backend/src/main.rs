@@ -1,4 +1,5 @@
-//! TServerMonitor: a zero-intrusion, read-only side-channel monitor with an AI ops advisor.
+//! TServerMonitor: a zero-intrusion side-channel monitor with an AI ops advisor. The daemon is
+//! read-only; optional root helpers (`updater`, `helper`) carry out changes the operator allows.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use tsmonitor::{
 #[command(
     name = "tsmonitor",
     version,
-    about = "Read-only server monitor with an AI ops advisor"
+    about = "Server monitor with an AI ops advisor and optional, helper-mediated management"
 )]
 struct Cli {
     /// Path to config.toml
@@ -34,6 +35,12 @@ enum Cmd {
         /// Root-owned helper config (never the daemon's config.toml)
         #[arg(long, default_value = "/etc/tsmonitor/updater.toml")]
         updater_config: PathBuf,
+    },
+    /// Run the optional ops helper for nginx, firewall, SSH and Docker (as root)
+    Helper {
+        /// Root-owned helper config (never the daemon's config.toml)
+        #[arg(long, default_value = "/etc/tsmonitor/helper.toml")]
+        helper_config: PathBuf,
     },
 }
 
@@ -59,6 +66,14 @@ fn main() -> Result<()> {
             .build()?
             .block_on(tsmonitor::updater::serve(ucfg));
     }
+    if let Some(Cmd::Helper { helper_config }) = &cli.cmd {
+        let hcfg = tsmonitor::helper::HelperConfig::load(helper_config)?;
+        return tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?
+            .block_on(tsmonitor::helper::serve(hcfg));
+    }
     let cfg = config::Config::load(&cli.config)?;
     if matches!(cli.cmd, Some(Cmd::CheckConfig)) {
         println!("config ok: {}", cli.config.display());
@@ -76,6 +91,10 @@ async fn run(cfg: config::Config) -> Result<()> {
     let db = store::open(&cfg.storage.data_dir).await?;
     store::close_stale_runs(&db).await?;
     tsmonitor::updater::close_stale_jobs(&db).await?;
+    tsmonitor::ops::close_stale_jobs(&db).await?;
+    if config::secret(&cfg.ops.secret_env).is_some() {
+        tsmonitor::ops::protect_secret();
+    }
     let state = state::AppState::new(cfg.clone(), db);
 
     let sandbox = Arc::new(sandbox::Sandbox::init(
@@ -84,10 +103,9 @@ async fn run(cfg: config::Config) -> Result<()> {
     )?);
     let isolation = sandbox::probe().await;
     // the key file next to the DB is only safe when analysis scripts cannot read the data dir
-    state.settings.set_file_key_allowed(matches!(
-        isolation.as_str(),
-        "fully_enforced" | "partially_enforced"
-    ));
+    let isolated = matches!(isolation.as_str(), "fully_enforced" | "partially_enforced");
+    state.settings.set_file_key_allowed(isolated);
+    state.ops.set_isolation(isolated);
     state
         .settings
         .reload(&state.db)
@@ -129,14 +147,18 @@ async fn run(cfg: config::Config) -> Result<()> {
     collect::spawn_all(&state);
     schedule::spawn(&state);
     telegram_bot::spawn(&state);
+    tsmonitor::ops::spawn(&state);
 
     let listener = tokio::net::TcpListener::bind(cfg.server.bind)
         .await
         .with_context(|| format!("binding {}", cfg.server.bind))?;
     tracing::info!("dashboard on http://{}", cfg.server.bind);
-    axum::serve(listener, api::router(state))
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    axum::serve(
+        listener,
+        api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await?;
     Ok(())
 }
 
