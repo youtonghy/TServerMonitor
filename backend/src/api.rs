@@ -2,7 +2,9 @@
 //!
 //! Reads (and the legacy manual trigger) use the optional bearer token. Everything that changes
 //! settings or starts interactive work sits in the admin group, which additionally requires the
-//! token to be configured at all and rejects cross-origin browser requests.
+//! token to be configured at all and rejects cross-origin browser requests. Server management
+//! (`/api/v1/ops/run`, `/mcp/ops`) sits in the ops group, which also requires the separate ops
+//! token in `X-TSM-Ops-Token`; the change itself runs in the root ops helper.
 
 use std::convert::Infallible;
 use std::time::Duration;

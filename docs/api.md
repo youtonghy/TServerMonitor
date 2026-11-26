@@ -10,6 +10,11 @@ and `/mcp` request needs `Authorization: Bearer <token>`. Because `EventSource`
 cannot send headers, `GET /api/v1/stream` also accepts `?token=<token>`.
 A request without a valid token gets `401 {"error": "unauthorized"}`.
 
+**Ops** endpoints (server management through the root ops helper) additionally require the separate
+ops token (env var named by `server.ops_token_env`, default `TSM_OPS_TOKEN`) in the header
+`X-TSM-Ops-Token` (never in a URL), and are refused cross-origin. Without a configured ops token they
+answer `403`.
+
 Admin endpoints additionally require that a token is configured at all (otherwise `403`), and
 browser requests whose `Origin` does not match `Host` are refused with `403`. Validation errors
 are `400 {"error": "<中文说明>"}`.
@@ -187,6 +192,15 @@ interface AgentStep {
 | GET | `/api/v1/packages/jobs` | `PackageJob[]` (latest 20, without `log`) |
 | GET | `/api/v1/packages/jobs/{id}` | `PackageJob` with `log` |
 | POST (admin) | `/api/v1/packages/jobs` body `{ op: "refresh" \| "upgrade_security" \| "upgrade_all" \| "upgrade_packages"; packages?: string[] }` | `202 { id }`; `400` when the update helper is not installed, a job is running, or a package name is invalid. Output streams as `package_job` events |
+| GET | `/api/v1/access/history?range=1h\|6h\|24h\|7d\|30d` | `AccessStats` from the persisted per-minute rollups (top lists and latency only up to 24h) |
+| GET | `/api/v1/ops/capabilities` | `OpsCapabilities` (helper reachable, enabled domains and allowed operations, dry-run, why writes are off) |
+| GET | `/api/v1/ops/read/{call}?path=` | `{ source: "helper" \| "local"; data }` for `docker.containers`, `docker.images`, `docker.volumes`, `docker.networks`, `nginx.sites`, `nginx.files`, `nginx.file` (`path`), `firewall.status`, `ssh.config`, `ssh.keys`. Falls back to what the daemon can read itself; `503` when only the helper can answer |
+| GET | `/api/v1/ssh/sessions` | `{ user, tty, since, from }[]` from `who` |
+| GET | `/api/v1/ops/jobs?domain=&limit=` | `OpsJob[]` without `log` |
+| GET | `/api/v1/ops/jobs/{id}` | `OpsJob` with `log` |
+| GET | `/api/v1/ops/audit?limit=` | `AuditEntry[]`, newest first (includes refused requests) |
+| GET | `/api/v1/ops/pending` | `PendingChange[]` firewall/sshd changes waiting for confirmation |
+| POST (ops) | `/api/v1/ops/run` body `{ call; args?; dry_run? }` | `OpsJob` after up to 20 s (`status` may still be `running`; follow `ops_job` events). See the call list below. `403` not allowed / no helper / no ops token, `400` invalid, `409` busy or stale `base_sha256`, `502` the change failed and was rolled back |
 | GET | `/api/v1/tasks` | `{ tasks: Task[]; system: SystemJob[] }` (`system` = fixed `[schedule]` jobs, read-only) |
 | POST (admin) | `/api/v1/tasks` body `TaskInput` (`name`, `trigger`, `prompt_id` required) | `{ id }` |
 | PATCH (admin) | `/api/v1/tasks/{id}` body `TaskInput` | `{ id }` |
@@ -260,6 +274,41 @@ interface PackageJob {
 interface ResolvedModel { provider: string; source: "db" | "config"; api_format: ApiFormat; base_url: string; model: string; auth: AuthStyle; effort: Effort }
 ```
 
+### Ops calls (`POST /api/v1/ops/run`)
+
+| call | args | notes |
+| --- | --- | --- |
+| `docker.container` | `{ id, action: start\|stop\|restart\|kill\|remove }` | protected containers can only be started; volumes are kept |
+| `docker.project` | `{ name, action: start\|stop\|restart }` | containers with `com.docker.compose.project = name` |
+| `docker.image_pull` | `{ reference }` | public images; progress streams as job log |
+| `docker.image_remove` | `{ id, force? }` | |
+| `docker.image_prune` / `docker.volume_prune` | `{}` | |
+| `docker.volume_remove` | `{ name }` | |
+| `nginx.test` / `nginx.reload` | `{}` | reload runs `nginx -t` first |
+| `nginx.site` | `{ name, enabled }` | symlink in `sites-enabled`, or `.conf` ↔ `.conf.disabled` |
+| `nginx.write` | `{ path, content, base_sha256? }` | `base_sha256` from `nginx.file`; omit for a new file. Dry run returns `result.diff` |
+| `firewall.add` | `{ action: allow\|deny\|reject\|limit, port, proto?: tcp\|udp\|any, from? }` | result `{ pending }` |
+| `firewall.delete` | `{ spec }` | `spec` exactly as listed by `firewall.status`; result `{ pending }` |
+| `firewall.toggle` | `{ enabled }` | ufw only; result `{ pending }` |
+| `ssh.set` | `{ options: { [key]: value } }` | keys from `ssh.config.options`; dry run returns `result.diff`; result `{ pending }` |
+| `ssh.key_add` | `{ user, key }` | one public key line, no options |
+| `ssh.key_remove` | `{ user, fingerprint }` | |
+| `pending.confirm` / `pending.revert` | `{ id }` | confirm is dashboard-only (refused over MCP) |
+
+```ts
+interface OpsJob {
+  id: number; domain: string; call: string; summary: string; args: unknown; dry_run: boolean;
+  via: "web" | "mcp"; remote: string | null; status: "running" | "succeeded" | "failed" | "unknown";
+  error: string | null; result: Record<string, unknown> | null; log?: string; started_at: number; finished_at: number | null;
+}
+interface PendingChange { id: string; domain: "firewall" | "ssh"; summary: string; created_at: number; deadline: number; via: string }
+interface AuditEntry { id: number; ts: number; via: string; remote: string | null; call: string; summary: string; dry_run: boolean; outcome: "started" | "succeeded" | "failed" | "refused"; detail: string | null; job_id: number | null }
+```
+
+`AccessStats` additionally carries `latency { p50_ms, p95_ms, p99_ms, samples } | null`, `slow_paths`,
+`top_hosts`, `user_agents` (browser / bot / tool / scanner / empty / other), `suspicious` (scanner probes or
+mostly 4xx), and `top_ips[].s4xx` / `scan`; series points carry `p95_ms`.
+
 ### SSE events (`/api/v1/stream`)
 
 | event | data |
@@ -273,6 +322,8 @@ interface ResolvedModel { provider: string; source: "db" | "config"; api_format:
 | `report` | `ReportSummary` |
 | `settings` | `{ generation: number }` (runtime settings changed; refetch) |
 | `package_job` | `{ id; status; line: string \| null }` one output line, or a status change when `line` is null |
+| `ops_job` | same shape as `package_job`, for ops helper jobs |
+| `ops_pending` | `PendingChange[]` (the full current list) whenever it changes |
 
 A `ping` comment is sent every 15 s.
 
@@ -283,8 +334,20 @@ A `ping` comment is sent every 15 s.
 `get_report { id }`, `list_findings`, plus the analysis tools shared with the built-in agent:
 `get_system_status`, `analyze_logs { since_hours?, source? }`, `get_access_stats { window_mins? }`
 (client addresses masked), `get_host_metrics { range }`, `search_log_clusters { source?, level?, query?, since_hours?, limit? }`,
-`list_containers`, `list_package_updates`. All are read-only; the agent's workspace/script tools
-are not exposed, and package upgrades are never available over MCP.
+`list_containers`, `list_package_updates`, `get_access_history { range }`, and the server inventory:
+`get_ops_capabilities`, `docker_inventory`, `docker_list_images`, `docker_list_volumes`, `docker_list_networks`,
+`nginx_list_sites`, `nginx_list_files`, `nginx_get_file { path }` (secret values replaced with `<redacted>`),
+`firewall_status`, `ssh_get_config`, `ssh_list_keys`, `ssh_list_sessions`, `list_ops_jobs`, `get_ops_job`,
+`list_pending_changes`. These are read-only; the agent's workspace/script tools are not exposed, and
+package upgrades are never available over MCP.
+
+`/mcp/ops` serves the same tools plus write tools, behind the ops token (`X-TSM-Ops-Token`). Every write
+tool defaults to `dry_run: true`; it returns `{ job_id, status, dry_run, error, result, log }` after up to
+120 s. Firewall and sshd changes are provisional (`result.pending`) and revert unless a person confirms them
+in the dashboard; `revert_change { id }` is available, confirming is not. `nginx_write_file` refuses content
+that still contains redaction placeholders. See [mcp.md](mcp.md) for client configuration.
+
+The MCP endpoints accept loopback `Host` headers plus `server.mcp_allowed_hosts`.
 
 ## Outbound webhooks
 

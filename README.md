@@ -1,8 +1,8 @@
 # TServerMonitor
 
-一个**默认零侵入、只读**的服务器旁路监控守护进程，自带 AI 运维参谋。
+一个**默认零侵入、只读**的服务器旁路监控守护进程，自带 AI 运维参谋，并可选地通过独立的 root 助手管理 nginx、防火墙、SSH 和 Docker。
 
-监控守护进程本身只“看”不“动”（唯一的例外是可选安装的软件包更新助手，见下文）：采集宿主机、Docker 容器、应用日志、数据库和安全基线数据，在本地脱敏和降噪后，由规则引擎实时告警，再由大模型做根因分析并每天给出可落地的改良建议。结果通过本地大屏、Telegram、REST API、MCP 和 Webhook 对外提供。
+监控守护进程本身只“看”不“动”；所有修改都由可选安装的 root 助手执行（软件包更新助手、运维助手，见下文），而且每一项都要由主机管理员在助手自己的配置里显式开启：采集宿主机、Docker 容器、应用日志、数据库和安全基线数据，在本地脱敏和降噪后，由规则引擎实时告警，再由大模型做根因分析并每天给出可落地的改良建议。结果通过本地大屏、Telegram、REST API、MCP 和 Webhook 对外提供。
 
 ```
 ┌──────────── 交互与协同 ────────────┐
@@ -34,7 +34,10 @@
 
 ## 安全边界
 
-- **只读**：代码中没有任何写宿主机、重启容器的调用；界面只能修改本程序自己的运行设置（模型 Provider、任务路由等，存在本地数据库），这类写接口必须配置 `TSM_API_TOKEN` 才可用。Docker 只用 list/inspect/stats/logs/events；数据库只执行内置白名单语句；模型无法传入 SQL 或任意路径。
+- **守护进程只读**：守护进程里没有写宿主机、重启容器的调用；它自己只能修改本程序的运行设置（模型 Provider、任务路由等，存在本地数据库），这类写接口必须配置 `TSM_API_TOKEN` 才可用。Docker 只用 list/inspect/stats/logs/events；数据库只执行内置白名单语句；模型无法传入 SQL 或任意路径。
+- **修改只经过 root 助手**：管理 nginx、防火墙、SSH、Docker 的请求由守护进程转交给可选的运维助手（`tsmonitor helper`）执行。助手只接受 root 或 `allowed_uids` 用户的连接，并且要求共享密钥；每个领域默认关闭，开启后也只能执行 `allow` 中列出的操作；命令以参数数组执行，不经过 shell。没有安装助手时，界面和 MCP 只能查看。
+- **运维令牌**：所有修改还需要独立的 `TSM_OPS_TOKEN`（只通过 `X-TSM-Ops-Token` 请求头发送，浏览器只存在内存中）。内置 Agent 只有只读工具，修改只能由人在面板上操作，或由持有运维令牌的外部 Agent 通过 `/mcp/ops` 发起。
+- **等同 root 的能力**：Docker 管理和 nginx 配置编辑本质上等同 root 权限（nginx 以 root 加载配置；能控制容器就能控制宿主机）。面板拦截了明显的越权写法（`load_module`、`user`、perl/js/lua、/var/log 之外的日志路径等），但请只把运维令牌交给可以拥有 root 的人或 Agent。
 - **脱敏**：密码、令牌、API Key、JWT、邮箱、卡号等在入库和进入模型上下文之前就被替换。
 - **AI 子进程**：Node 进程只拿到模型密钥（通过环境变量），没有任何读文件或执行命令的工具；所有工具都在 Rust 侧执行。
 - **沙箱**：AI 写的 Python 脚本只能放在 `<data_dir>/workspace/scripts/`，运行时清空环境变量、限制内存/CPU/文件大小、有超时和输出上限。在 Linux 上额外启用 Landlock：只能读系统运行库、只能写工作区；内核 6.7 及以上还会禁止联网。启动日志和 `/api/v1/status` 会显示实际隔离级别。
@@ -183,11 +186,32 @@ hourly = "fast"
 - 页面上的每次操作都需要确认；任务输出实时显示并保存。守护进程重启时正在运行的任务会标记为“状态未知”（助手会继续执行完）。
 - 在 Docker 中运行时，列表描述的是容器镜像，升级按钮会被禁用。
 
+## 服务器管理（nginx / 防火墙 / SSH / Docker）
+
+可选安装的运维助手让面板与外部 Agent 可以管理服务器。安装步骤见 `deploy/tsmonitor-helper.service` 文件头，配置见 `deploy/helper.example.toml`（所有领域默认关闭）。
+
+| 领域 | 可以做的事 | 安全措施 |
+| --- | --- | --- |
+| Docker | 启动/停止/重启/强制终止/删除已有容器；按 compose 标签整体启停项目；拉取、删除、清理镜像；删除、清理卷 | 不提供 exec 与新建容器；套接字代理、TServerMonitor 自身和配置中列出的容器只能启动；删卷与清理卷是单独开关 |
+| nginx | 检查配置、重新加载、启用/停用站点、在 `conf.d` / `sites-available` / `snippets` 中编辑或新建文件 | 写入前备份并要求读取时的 sha256（防止覆盖他人修改）；随后执行 `nginx -t`、重新加载，并可探测 `probe_url`，任一步失败都逐字节恢复原文件 |
+| 防火墙 | ufw、firewalld 增删规则，ufw 启停；nftables 只能在独立的 `inet tsmonitor` 表中添加拒绝规则；iptables 只读 | 不能对所有来源封锁 SSH 端口、不能删除放行 SSH 的最后一条规则、未放行 SSH 时不能启用 ufw；每次修改都要在倒计时内确认，否则自动回滚 |
+| SSH | 通过 `sshd_config.d/00-tsmonitor.conf` 修改一组固定选项；为登录用户增删 `authorized_keys` 公钥；查看会话 | 执行 `sshd -t` 并用 `sshd -T` 核对生效值；拒绝关闭所有登录方式、在没有可用公钥时关闭密码登录；修改需确认否则回滚；公钥文件以 `O_NOFOLLOW` 打开并校验属主，防符号链接与硬链接攻击 |
+
+- **确认或回滚**：防火墙和 sshd 的修改会立即生效，页面顶部显示倒计时（默认 120 秒）。请在另一个终端**新建** SSH 连接确认能登录后再点“保留变更”，因为已建立的连接不受影响。不确认、助手崩溃或重启时都会自动回滚。外部 Agent 可以撤销但不能确认。
+- **演练模式**：助手配置 `dry_run = true` 时只记录将要执行的命令；单次请求也可以先演练（nginx 与 sshd 会返回 diff）。
+- **审计**：每次修改请求（包括被拒绝的）都记录在“运维记录”页；助手另在 journald 中记录自己的审计日志（`journalctl -u tsmonitor-helper`）。
+- 分析脚本沙箱没有内核级隔离时，守护进程拒绝提交修改（可在 `[ops] allow_without_sandbox` 放开）。
+
 ## 对外接口
 
 - REST + SSE：见 [`docs/api.md`](docs/api.md)。
-- MCP（Streamable HTTP）：`http://127.0.0.1:8787/mcp`，工具有 `get_health_snapshot`、`list_alerts`、`get_latest_report`、`get_report`、`list_findings`，以及与内置 Agent 共用实现的 `get_system_status`（系统状态分析）、`analyze_logs`（日志分析）、`get_access_stats`（实时访问分析，来源地址打码）、`get_host_metrics`、`search_log_clusters`、`list_containers`。全部只读，不暴露脚本执行类工具。
-- 实时访问分析：配置 `kind = "nginx_access"` 的日志源后，日志页顶部显示每分钟请求数、状态码分布、5xx 比例、热门接口与来源地址（内存中保留最近 1 小时）。
+- MCP（Streamable HTTP），两个入口：
+  - `http://127.0.0.1:8787/mcp`：只读。诊断工具（`get_health_snapshot`、`list_alerts`、`get_latest_report`、`get_report`、`list_findings`、`get_system_status`、`analyze_logs`、`get_access_stats`、`get_access_history`、`get_host_metrics`、`search_log_clusters`、`list_containers`、`list_package_updates`），以及服务器清单（`get_ops_capabilities`、`docker_inventory`、`docker_list_images/volumes/networks`、`nginx_list_sites`、`nginx_list_files`、`nginx_get_file`、`firewall_status`、`ssh_get_config`、`ssh_list_keys`、`ssh_list_sessions`、`list_ops_jobs`、`get_ops_job`、`list_pending_changes`）。敏感值已打码。
+  - `http://127.0.0.1:8787/mcp/ops`：在只读工具之外再提供修改工具（`docker_container_action`、`docker_project_action`、`docker_image_pull`、`docker_image_remove`、`docker_prune`、`docker_volume_remove`、`nginx_test`、`nginx_reload`、`nginx_site_toggle`、`nginx_write_file`、`firewall_rule_add`、`firewall_rule_delete`、`firewall_toggle`、`ssh_set_options`、`ssh_key_add`、`ssh_key_remove`、`revert_change`）。需要 `X-TSM-Ops-Token`；所有修改工具默认演练，需显式传 `dry_run: false`；没有确认变更的工具。
+  - 通过反向代理访问时，把域名加入 `[server] mcp_allowed_hosts`。接入示例见 [`docs/mcp.md`](docs/mcp.md)。
+- 访问分析：配置 `kind = "nginx_access"` 的日志源后，日志页显示请求量、状态码、P50/P95/P99 延迟（日志格式需包含 `$request_time`）、热门与慢接口、虚拟主机、UA 分类和可疑来源；支持 combined 格式和 JSON 访问日志。按分钟持久化，可查看 24 小时 / 7 天 / 30 天历史。5xx 比例、单地址请求洪泛、扫描敏感路径会触发告警（阈值见 `[thresholds] access_*`）。
+- systemd journal：默认把 warning 及以上级别的日志作为 `journal` 日志源；`[journal] units` 中的单元会完整跟读。没有 `/var/log/auth.log` 的主机会改用 journal 做 SSH 登录审计。
+- nginx 体检：每次安全巡检读取 nginx 配置，给出版本暴露、gzip、TLS 协议、HTTP/2、keepalive、缺少 `$request_time` 等建议，并根据访问统计列出慢接口。
 - Webhook：`[[notify.webhooks]]` 配置后，告警和报告会 POST 过去；配置 `secret_env` 后带 `X-TSM-Signature: sha256=<HMAC>`。
 
 ## 本地开发
@@ -220,7 +244,10 @@ cargo run -- --config config.toml
 
 ## 已知限制
 
-- 单机部署，不做多服务器集中管理；Agent 不做任何自动修复，只给建议。
+- 单机部署，不做多服务器集中管理；内置 Agent 不做任何自动修复，只给建议。
+- 运维助手面向 Linux + systemd（ufw、firewalld、nftables、sshd、nginx 的实际命令行为请先用演练模式在目标主机上确认）；nftables 规则只在运行时生效（重启后需自行持久化）；firewalld 确认时会一并持久化其他未保存的运行时改动。
+- Docker 拉取只支持公开镜像；compose 项目只按标签启停已有容器，不执行 `docker compose up/down`。
+- 回滚窗口内整机重启、且坏规则已经持久化时，助手启动后才会回滚；请保持较短的确认窗口。
 - 安全体检只支持 Linux；待装更新列表支持 apt、dnf 和 Homebrew，基于本机已有索引（守护进程不会刷新）。执行升级只支持 apt 和 dnf，且需要单独安装更新助手；Homebrew 只查看。
 - 数据库只支持 MySQL 和 PostgreSQL（PostgreSQL 连接不启用 TLS，建议连本机）。
 - Landlock 需要 Linux 5.13+ 并在内核中启用；网络隔离需要 6.7+。其他平台只有路径守卫、资源上限和超时。
