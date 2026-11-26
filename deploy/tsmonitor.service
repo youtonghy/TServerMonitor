@@ -6,6 +6,7 @@
 #   sudo install -d -m 0750 /etc/tsmonitor && sudo install -m 0640 config.example.toml /etc/tsmonitor/config.toml
 #   sudo install -m 0600 /dev/null /etc/tsmonitor/env   # then put secrets in it, e.g. TSM_LLM_API_KEY=...
 #   sudo cp tsmonitor.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now tsmonitor
+#   sudo cat /var/lib/tsmonitor/setup-code    # one-time code for the setup wizard on first visit
 #
 # Docker: do NOT add tsmonitor to the docker group (that is root-equivalent). Run a read-only
 # socket proxy and set DOCKER_HOST in /etc/tsmonitor/env, see README.

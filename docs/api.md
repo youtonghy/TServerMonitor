@@ -1,23 +1,44 @@
 # TServerMonitor HTTP API
 
-`GET` endpoints are read-only. Write endpoints are `POST /api/v1/agent/trigger` and the
-**admin** endpoints marked below. Responses are JSON.
+`GET` endpoints are read-only. Write endpoints are `POST /api/v1/agent/trigger`, the account endpoints, the
+**admin** endpoints and the **ops** endpoint marked below. Responses are JSON.
 Timestamps are Unix epoch **milliseconds** (`i64`). Byte counts are integers in bytes,
 rates are per second unless the field name says otherwise.
 
-Authentication: when the environment variable `TSM_API_TOKEN` is set, every `/api/*`
-and `/mcp` request needs `Authorization: Bearer <token>`. Because `EventSource`
-cannot send headers, `GET /api/v1/stream` also accepts `?token=<token>`.
-A request without a valid token gets `401 {"error": "unauthorized"}`.
+Authentication: every `/api/*` and `/mcp*` request needs one of
+- the **session cookie** `tsm_session` (HttpOnly, SameSite=Strict) set by `POST /api/v1/auth/login` or the
+  setup wizard; browser writes must be same-origin (`Origin` must match `Host`, else `403 cross_origin`);
+- an **API token** `Authorization: Bearer tsm_...` created under Settings (scope `read` or `ops`);
+- the deprecated static tokens: `Bearer $TSM_API_TOKEN` (read + settings) and `X-TSM-Ops-Token: $TSM_OPS_TOKEN`
+  (server changes), when those env vars are set.
 
-**Ops** endpoints (server management through the root ops helper) additionally require the separate
-ops token (env var named by `server.ops_token_env`, default `TSM_OPS_TOKEN`) in the header
-`X-TSM-Ops-Token` (never in a URL), and are refused cross-origin. Without a configured ops token they
-answer `403`.
+Errors from the auth layer carry a `code`: `{"error": "...", "code": "setup_required" | "login_required" |
+"sudo_required" | "scope_required" | "user_required" | "cross_origin" | "forbidden"}`. Before the first
+administrator exists every protected request answers `401 setup_required`.
 
-Admin endpoints additionally require that a token is configured at all (otherwise `403`), and
-browser requests whose `Origin` does not match `Host` are refused with `403`. Validation errors
-are `400 {"error": "<中文说明>"}`.
+| Group | Who may call |
+| --- | --- |
+| public | `GET /api/v1/auth/state`, `POST /api/v1/auth/setup`, `POST /api/v1/auth/login`, the dashboard files |
+| read (everything else) | any signed-in account or token |
+| **admin** (marked below) | a signed-in account, or `TSM_API_TOKEN`; API tokens cannot change settings |
+| **ops** (`POST /api/v1/ops/run`, `/mcp/ops`) | an account that confirmed its password within 10 minutes (`POST /api/v1/auth/sudo`), an `ops` API token, or `TSM_OPS_TOKEN` |
+| account (`/api/v1/auth/*` below) | signed-in accounts only (not tokens) |
+
+### Account endpoints
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/api/v1/auth/state` | `{ setup_required, authenticated, kind: "session" \| "token" \| "legacy" \| null, user: { id, username } \| null, sudo_until }` |
+| POST | `/api/v1/auth/setup` body `{ code, username, password }` | creates the first administrator and signs in (`Set-Cookie`); `400` wrong code / weak password, `409` already done |
+| POST | `/api/v1/auth/login` body `{ username, password }` | `{ user }` + `Set-Cookie`; `401 bad_credentials`; 5 failures lock that address and name for 15 minutes |
+| POST | `/api/v1/auth/logout` | clears the session |
+| POST | `/api/v1/auth/sudo` body `{ password }` | `{ sudo_until }` (now + 10 min) |
+| POST | `/api/v1/auth/password` body `{ current, new }` | signs out the account's other sessions |
+| GET / DELETE | `/api/v1/auth/sessions`, `/api/v1/auth/sessions/{id}` | own sessions `{ id, created_at, last_seen, expires_at, remote, user_agent, current }[]` |
+| GET / POST / DELETE | `/api/v1/auth/users` body `{ username, password }`, `/api/v1/auth/users/{id}` | administrators; create and delete need sudo; the last account and yourself cannot be deleted |
+| GET / POST / DELETE | `/api/v1/auth/tokens` body `{ name, scope: "read" \| "ops", expires_days?: number \| null }`, `/api/v1/auth/tokens/{id}` | POST (sudo) returns `{ token, record }` once; DELETE revokes |
+
+Validation errors are `400 {"error": "<中文说明>"}`.
 
 Alert `source` is `host`, `docker`, `security`, `database` or a log source name. `DbStatus.metrics`
 keys vary by engine (e.g. `threads_connected`, `qps`, `buffer_hit_pct`, `connection_usage_pct`, `active`,
@@ -200,7 +221,7 @@ interface AgentStep {
 | GET | `/api/v1/ops/jobs/{id}` | `OpsJob` with `log` |
 | GET | `/api/v1/ops/audit?limit=` | `AuditEntry[]`, newest first (includes refused requests) |
 | GET | `/api/v1/ops/pending` | `PendingChange[]` firewall/sshd changes waiting for confirmation |
-| POST (ops) | `/api/v1/ops/run` body `{ call; args?; dry_run? }` | `OpsJob` after up to 20 s (`status` may still be `running`; follow `ops_job` events). See the call list below. `403` not allowed / no helper / no ops token, `400` invalid, `409` busy or stale `base_sha256`, `502` the change failed and was rolled back |
+| POST (ops) | `/api/v1/ops/run` body `{ call; args?; dry_run? }` | `OpsJob` after up to 20 s (`status` may still be `running`; follow `ops_job` events). See the call list below. `403` not allowed / no helper / `sudo_required` / `scope_required`, `400` invalid, `409` busy or stale `base_sha256`, `502` the change failed and was rolled back |
 | GET | `/api/v1/tasks` | `{ tasks: Task[]; system: SystemJob[] }` (`system` = fixed `[schedule]` jobs, read-only) |
 | POST (admin) | `/api/v1/tasks` body `TaskInput` (`name`, `trigger`, `prompt_id` required) | `{ id }` |
 | PATCH (admin) | `/api/v1/tasks/{id}` body `TaskInput` | `{ id }` |
@@ -341,7 +362,7 @@ A `ping` comment is sent every 15 s.
 `list_pending_changes`. These are read-only; the agent's workspace/script tools are not exposed, and
 package upgrades are never available over MCP.
 
-`/mcp/ops` serves the same tools plus write tools, behind the ops token (`X-TSM-Ops-Token`). Every write
+`/mcp` needs any API token (or session); `/mcp/ops` serves the same tools plus write tools and needs an `ops` token. Every write
 tool defaults to `dry_run: true`; it returns `{ job_id, status, dry_run, error, result, log }` after up to
 120 s. Firewall and sshd changes are provisional (`result.pending`) and revert unless a person confirms them
 in the dashboard; `revert_change { id }` is available, confirming is not. `nginx_write_file` refuses content

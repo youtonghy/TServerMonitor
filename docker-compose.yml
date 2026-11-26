@@ -2,10 +2,10 @@
 # container and log pages have something to show.
 #
 #   docker compose up -d --build
-#   open http://127.0.0.1:8787 and paste the token from TSM_API_TOKEN (default: tsm-local-demo)
+#   open http://127.0.0.1:8787 and create the administrator with the setup code from
+#   `docker compose logs tsmonitor | grep "setup code"`
 #
 # The dashboard lives at "/", the REST API under /api/v1, and MCP at /mcp.
-# Set TSM_API_TOKEN in a .env file (git-ignored) to use a different token.
 
 services:
   tsmonitor:
@@ -20,7 +20,6 @@ services:
     ports:
       - "127.0.0.1:8787:8787"
     environment:
-      TSM_API_TOKEN: ${TSM_API_TOKEN:-tsm-local-demo}
       DOCKER_HOST: tcp://docker-proxy:2375
       TSM_LOG: ${TSM_LOG:-info}
     volumes:

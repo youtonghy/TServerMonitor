@@ -5,9 +5,8 @@
 #
 # Install (as root):
 #   install -m 0600 helper.example.toml /etc/tsmonitor/helper.toml   # set allowed_uids = [$(id -u tsmonitor)]
-#   # one secret shared by both units, and the ops token for the dashboard / MCP (two different values):
+#   # one secret shared by both units:
 #   echo "TSM_HELPER_SECRET=$(openssl rand -hex 24)" >> /etc/tsmonitor/env
-#   echo "TSM_OPS_TOKEN=$(openssl rand -hex 24)"     >> /etc/tsmonitor/env
 #   cp tsmonitor-helper.service /etc/systemd/system/ && systemctl daemon-reload
 #   systemctl enable --now tsmonitor-helper && systemctl restart tsmonitor
 # Keep dry_run = true in helper.toml until the job logs show exactly what you expect.

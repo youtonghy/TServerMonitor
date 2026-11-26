@@ -4,8 +4,11 @@ TServerMonitor serves the Model Context Protocol over Streamable HTTP on the das
 
 | Endpoint | What it offers | Headers |
 | --- | --- | --- |
-| `/mcp` | Read-only: diagnostics, logs, access analysis, alerts, reports, and the server inventory (Docker, nginx, firewall, SSH), secrets redacted | `Authorization: Bearer $TSM_API_TOKEN` when the API token is set |
-| `/mcp/ops` | Everything on `/mcp` plus write tools for Docker, nginx, firewall and SSH | the API token as above **and** `X-TSM-Ops-Token: $TSM_OPS_TOKEN` |
+| `/mcp` | Read-only: diagnostics, logs, access analysis, alerts, reports, and the server inventory (Docker, nginx, firewall, SSH), secrets redacted | `Authorization: Bearer <token>` with a `read` or `ops` API token |
+| `/mcp/ops` | Everything on `/mcp` plus write tools for Docker, nginx, firewall and SSH | `Authorization: Bearer <token>` with an `ops` API token |
+
+Create the tokens in the dashboard under **Settings → API 令牌** (shown once; revocable, optional
+expiry). The deprecated `TSM_API_TOKEN` / `X-TSM-Ops-Token: $TSM_OPS_TOKEN` still work when set.
 
 Give an agent `/mcp/ops` only if you would give it root on the host: what it can change is limited
 by the ops helper's own config (`/etc/tsmonitor/helper.toml`), but Docker control and nginx config
@@ -14,7 +17,7 @@ editing are root-equivalent.
 ## Example client configuration
 
 Most MCP clients accept a URL plus headers. For example, a project-level `.mcp.json`
-(values come from the environment; never paste tokens into the file):
+(`TSM_READ_TOKEN` / `TSM_AGENT_OPS_TOKEN` are environment variables holding API tokens you created; never paste tokens into the file):
 
 ```json
 {
@@ -22,15 +25,12 @@ Most MCP clients accept a URL plus headers. For example, a project-level `.mcp.j
     "tsmonitor": {
       "type": "http",
       "url": "http://127.0.0.1:8787/mcp",
-      "headers": { "Authorization": "Bearer ${TSM_API_TOKEN}" }
+      "headers": { "Authorization": "Bearer ${TSM_READ_TOKEN}" }
     },
     "tsmonitor-ops": {
       "type": "http",
       "url": "http://127.0.0.1:8787/mcp/ops",
-      "headers": {
-        "Authorization": "Bearer ${TSM_API_TOKEN}",
-        "X-TSM-Ops-Token": "${TSM_OPS_TOKEN}"
-      }
+      "headers": { "Authorization": "Bearer ${TSM_AGENT_OPS_TOKEN}" }
     }
   }
 }

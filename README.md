@@ -34,15 +34,16 @@
 
 ## 安全边界
 
-- **守护进程只读**：守护进程里没有写宿主机、重启容器的调用；它自己只能修改本程序的运行设置（模型 Provider、任务路由等，存在本地数据库），这类写接口必须配置 `TSM_API_TOKEN` 才可用。Docker 只用 list/inspect/stats/logs/events；数据库只执行内置白名单语句；模型无法传入 SQL 或任意路径。
+- **守护进程只读**：守护进程里没有写宿主机、重启容器的调用；它自己只能修改本程序的运行设置（模型 Provider、任务路由等，存在本地数据库），这类写接口需要登录。Docker 只用 list/inspect/stats/logs/events；数据库只执行内置白名单语句；模型无法传入 SQL 或任意路径。
 - **修改只经过 root 助手**：管理 nginx、防火墙、SSH、Docker 的请求由守护进程转交给可选的运维助手（`tsmonitor helper`）执行。助手只接受 root 或 `allowed_uids` 用户的连接，并且要求共享密钥；每个领域默认关闭，开启后也只能执行 `allow` 中列出的操作；命令以参数数组执行，不经过 shell。没有安装助手时，界面和 MCP 只能查看。
-- **运维令牌**：所有修改还需要独立的 `TSM_OPS_TOKEN`（只通过 `X-TSM-Ops-Token` 请求头发送，浏览器只存在内存中）。内置 Agent 只有只读工具，修改只能由人在面板上操作，或由持有运维令牌的外部 Agent 通过 `/mcp/ops` 发起。
-- **等同 root 的能力**：Docker 管理和 nginx 配置编辑本质上等同 root 权限（nginx 以 root 加载配置；能控制容器就能控制宿主机）。面板拦截了明显的越权写法（`load_module`、`user`、perl/js/lua、/var/log 之外的日志路径等），但请只把运维令牌交给可以拥有 root 的人或 Agent。
+- **登录**：首次启动时由 setup 向导创建管理员（需要服务器上 `<data_dir>/setup-code` 中的一次性 setup 码，防止他人抢先注册）；之后面板、REST、SSE、MCP 都需要认证。浏览器使用 HttpOnly、SameSite=Strict 的会话 Cookie；密码用 argon2id 存储，连续 5 次失败锁定 15 分钟。忘记密码时在主机上执行 `tsmonitor --config /etc/tsmonitor/config.toml reset-password --user <名字>`。
+- **修改服务器需二次确认**：面板上的运维修改、账号与令牌管理，需要在 10 分钟内确认过一次密码。机器访问（MCP、脚本）使用「设置 → API 令牌」签发的令牌：`read` 可访问 REST 读接口与 `/mcp`，`ops` 还可访问 `/mcp/ops` 修改服务器。内置 Agent 只有只读工具。
+- **等同 root 的能力**：Docker 管理和 nginx 配置编辑本质上等同 root 权限（nginx 以 root 加载配置；能控制容器就能控制宿主机）。面板拦截了明显的越权写法（`load_module`、`user`、perl/js/lua、/var/log 之外的日志路径等），但请只把账号和 `ops` 令牌交给可以拥有 root 的人或 Agent。
 - **脱敏**：密码、令牌、API Key、JWT、邮箱、卡号等在入库和进入模型上下文之前就被替换。
 - **AI 子进程**：Node 进程只拿到模型密钥（通过环境变量），没有任何读文件或执行命令的工具；所有工具都在 Rust 侧执行。
 - **沙箱**：AI 写的 Python 脚本只能放在 `<data_dir>/workspace/scripts/`，运行时清空环境变量、限制内存/CPU/文件大小、有超时和输出上限。在 Linux 上额外启用 Landlock：只能读系统运行库、只能写工作区；内核 6.7 及以上还会禁止联网。启动日志和 `/api/v1/status` 会显示实际隔离级别。
 - **资源配额**：用 `deploy/tsmonitor.service` 部署时，守护进程及其派生的 Node/Python 进程共享 `CPUQuota=25%`、`MemoryMax=512M`、IO 空闲优先级。
-- **网络暴露**：大屏默认只监听 `127.0.0.1`；改为其他地址时必须设置 `TSM_API_TOKEN`，否则拒绝启动。
+- **网络暴露**：大屏默认只监听 `127.0.0.1`。对外提供时建议放在 TLS 反向代理之后（`[auth] secure_cookie` 会据此给 Cookie 加 `Secure`）。
 
 ## 部署（Linux 服务器）
 
@@ -69,10 +70,10 @@
 仓库自带 `Dockerfile` 和 `docker-compose.yml`，一条命令把守护进程、只读 Docker 代理和一台产生真实日志的演示容器跑起来：
 
 ```sh
-docker compose up -d --build        # 打开 http://127.0.0.1:8787，默认令牌 tsm-local-demo
+docker compose up -d --build        # 打开 http://127.0.0.1:8787，按 setup 向导创建管理员
 ```
 
-- 大屏、REST API、MCP 共用 8787 端口。`docker/demo.toml` 是演示配置，监听 `0.0.0.0`，所以必须带 `TSM_API_TOKEN`（默认值仅用于本机试跑，可在 `.env` 里改）。
+- 大屏、REST API、MCP 共用 8787 端口。首次打开会进入 setup 向导，setup 码用 `docker compose exec tsmonitor cat /data/setup-code` 或 `docker compose logs tsmonitor | grep "setup code"` 查看。
 - 采集数据存在 `tsmonitor-data` 卷里，`docker compose down -v` 会连数据一起清掉。
 - 容器采集走 `tecnativa/docker-socket-proxy`（只读），不需要把真实套接字交给守护进程。
 - 演示容器 `demo-nginx` + `demo-traffic` 生成真实访问日志，供容器页和日志页展示；不需要可以删掉这两个服务。
@@ -110,7 +111,7 @@ GRANT pg_monitor TO tsm;
 | 环境变量 | 用途 |
 | --- | --- |
 | `TSM_LLM_API_KEY` | 模型密钥（变量名可在 `api_key_env` 中改） |
-| `TSM_API_TOKEN` | 大屏/API/MCP 访问令牌；非回环监听时必填；界面上的所有写操作（设置等）都要求设置它 |
+| `TSM_API_TOKEN` / `TSM_OPS_TOKEN` | 已弃用的静态令牌：设置后仍可作为机器令牌使用（前者可读和改设置，后者可修改服务器），启动时会提示迁移到面板签发的 API 令牌 |
 | `TSM_SECRET_KEY` | 加密界面中填写的模型密钥所用的主密钥（任意长字符串）。未设置时自动生成 `<data_dir>/secret.key`，但仅在 Landlock 能隔离数据目录时允许 |
 | `TSM_TELEGRAM_BOT_TOKEN` | Telegram 机器人令牌 |
 | `TSM_DB_<名称>_DSN` | 数据库只读连接串（变量名在 `dsn_env` 中配置） |
@@ -207,7 +208,7 @@ hourly = "fast"
 - REST + SSE：见 [`docs/api.md`](docs/api.md)。
 - MCP（Streamable HTTP），两个入口：
   - `http://127.0.0.1:8787/mcp`：只读。诊断工具（`get_health_snapshot`、`list_alerts`、`get_latest_report`、`get_report`、`list_findings`、`get_system_status`、`analyze_logs`、`get_access_stats`、`get_access_history`、`get_host_metrics`、`search_log_clusters`、`list_containers`、`list_package_updates`），以及服务器清单（`get_ops_capabilities`、`docker_inventory`、`docker_list_images/volumes/networks`、`nginx_list_sites`、`nginx_list_files`、`nginx_get_file`、`firewall_status`、`ssh_get_config`、`ssh_list_keys`、`ssh_list_sessions`、`list_ops_jobs`、`get_ops_job`、`list_pending_changes`）。敏感值已打码。
-  - `http://127.0.0.1:8787/mcp/ops`：在只读工具之外再提供修改工具（`docker_container_action`、`docker_project_action`、`docker_image_pull`、`docker_image_remove`、`docker_prune`、`docker_volume_remove`、`nginx_test`、`nginx_reload`、`nginx_site_toggle`、`nginx_write_file`、`firewall_rule_add`、`firewall_rule_delete`、`firewall_toggle`、`ssh_set_options`、`ssh_key_add`、`ssh_key_remove`、`revert_change`）。需要 `X-TSM-Ops-Token`；所有修改工具默认演练，需显式传 `dry_run: false`；没有确认变更的工具。
+  - `http://127.0.0.1:8787/mcp/ops`：在只读工具之外再提供修改工具（`docker_container_action`、`docker_project_action`、`docker_image_pull`、`docker_image_remove`、`docker_prune`、`docker_volume_remove`、`nginx_test`、`nginx_reload`、`nginx_site_toggle`、`nginx_write_file`、`firewall_rule_add`、`firewall_rule_delete`、`firewall_toggle`、`ssh_set_options`、`ssh_key_add`、`ssh_key_remove`、`revert_change`）。需要 `ops` 范围的 API 令牌；所有修改工具默认演练，需显式传 `dry_run: false`；没有确认变更的工具。
   - 通过反向代理访问时，把域名加入 `[server] mcp_allowed_hosts`。接入示例见 [`docs/mcp.md`](docs/mcp.md)。
 - 访问分析：配置 `kind = "nginx_access"` 的日志源后，日志页显示请求量、状态码、P50/P95/P99 延迟（日志格式需包含 `$request_time`）、热门与慢接口、虚拟主机、UA 分类和可疑来源；支持 combined 格式和 JSON 访问日志。按分钟持久化，可查看 24 小时 / 7 天 / 30 天历史。5xx 比例、单地址请求洪泛、扫描敏感路径会触发告警（阈值见 `[thresholds] access_*`）。
 - systemd journal：默认把 warning 及以上级别的日志作为 `journal` 日志源；`[journal] units` 中的单元会完整跟读。没有 `/var/log/auth.log` 的主机会改用 journal 做 SSH 登录审计。

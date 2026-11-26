@@ -4,7 +4,7 @@
 
 [server]
 # Inside the container the daemon must listen on all interfaces for the published port to work.
-# A non-loopback bind requires TSM_API_TOKEN, which docker-compose.yml sets.
+# Listening on all interfaces inside the container; the dashboard requires a login.
 bind = "0.0.0.0:8787"
 token_env = "TSM_API_TOKEN"
 
