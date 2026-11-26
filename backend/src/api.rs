@@ -1206,7 +1206,18 @@ async fn get_ops_read(
     Query(q): Query<std::collections::BTreeMap<String, String>>,
 ) -> ApiResult<Value> {
     let args = json!(q);
-    Ok(Json(crate::ops::read(&state, &call, args).await?))
+    let mut v = crate::ops::read(&state, &call, args).await?;
+    // Without an API token, reads are open to any local process. Config text read by the root
+    // helper may hold secrets the daemon user could not read itself, so it is redacted (and
+    // therefore not editable) unless the dashboard is protected by a token.
+    if call == "nginx.file"
+        && crate::config::secret(&state.cfg.server.token_env).is_none()
+        && let Some(c) = v["data"]["content"].as_str()
+    {
+        v["data"]["content"] = crate::ops::redact_config(c).into();
+        v["data"]["editable"] = false.into();
+    }
+    Ok(Json(v))
 }
 
 async fn get_ssh_sessions() -> ApiResult<Value> {
