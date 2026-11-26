@@ -1,4 +1,6 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
+import SegmentedControl from "@/components/arc/segmented-control/segmented-control";
+import { DockerManage } from "@/components/docker-manage";
 import { Badge } from "@/components/arc/badge/badge";
 import { CodeBlock } from "@/components/arc/code-block/code-block";
 import { Drawer, DrawerContent, useDrawerItem } from "@/components/arc/drawer/drawer";
@@ -61,6 +63,12 @@ function horizon(containers: ContainerInfo[]) {
 }
 
 export default function ContainersPage() {
+  const [tab, setTab] = useState("monitor");
+  const tabs = <SegmentedControl label="视图" options={[{ value: "monitor", label: "监控" }, { value: "manage", label: "管理" }]} value={tab} onValueChange={setTab} />;
+  return tab === "monitor" ? <MonitorView tabs={tabs} /> : <DockerManage tabs={tabs} />;
+}
+
+function MonitorView({ tabs }: { tabs: ReactNode }) {
   const containers = useQuery(() => api.containers(), [], { refreshMs: 60_000 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -121,7 +129,7 @@ export default function ContainersPage() {
 
   return (
     <>
-      <PageHeader title="容器" description="Docker 容器状态、资源占用与日志" />
+      <PageHeader title="Docker" description="容器状态、资源占用与日志">{tabs}</PageHeader>
 
       <Section
         title="容器列表"

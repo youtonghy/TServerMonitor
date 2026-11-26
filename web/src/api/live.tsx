@@ -5,7 +5,7 @@ import { getToken, notifyUnauthorized, onTokenChange, streamUrl } from "./client
 import type { ContainerEventItem, HostMetrics, ModeState, StreamEventMap, StreamEventName } from "./types";
 
 export const METRIC_BUFFER = 360;
-const EVENTS: StreamEventName[] = ["metrics", "containers", "alert", "mode", "agent", "agent_delta", "report", "settings", "package_job"];
+const EVENTS: StreamEventName[] = ["metrics", "containers", "alert", "mode", "agent", "agent_delta", "report", "settings", "package_job", "ops_job", "ops_pending"];
 
 export type ConnectionState = "connecting" | "open" | "closed";
 

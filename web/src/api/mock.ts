@@ -1,6 +1,7 @@
 // Development mock (VITE_MOCK=1). Generates data that conforms to docs/api.md and simulates the SSE stream.
 // Never imported by production builds.
 import { ApiError, type Api } from "./client";
+import { opsMock } from "./mock-ops";
 import type {
   AgentRun, AgentRunDetail, AgentStep, AiStatus, Alert, ContainerInfo, ContainerLogLine, DailyErrorCount, DbStatus,
   Diagnosis, Finding, HostMetrics, LogCluster, LogRatesResponse, LogSource, MetricPoint, MetricsRange, ModeState,
@@ -755,6 +756,7 @@ function snapshot(): Snapshot {
 }
 
 export const mockApi: Api = {
+  ...opsMock(emit),
   status: () => delay({
     version: "0.1.0-dev", platform: "linux-x86_64", started_at: BOOT - 2 * DAY, mode: { ...mode }, ai: { ...ai },
     collectors: {
@@ -950,10 +952,18 @@ export const mockApi: Api = {
           { path: "GET /healthz", requests: Math.round(requests * 0.05), s5xx: 0 },
         ],
         top_ips: [
-          { ip: "203.0.113.42", requests: Math.round(requests * 0.12) },
-          { ip: "198.51.100.7", requests: Math.round(requests * 0.08) },
-          { ip: "10.0.3.15", requests: Math.round(requests * 0.05) },
+          { ip: "203.0.113.42", requests: Math.round(requests * 0.12), s4xx: 14, scan: 0 },
+          { ip: "198.51.100.7", requests: Math.round(requests * 0.08), s4xx: 3, scan: 0 },
+          { ip: "10.0.3.15", requests: Math.round(requests * 0.05), s4xx: 0, scan: 0 },
         ],
+        latency: { p50_ms: 50, p95_ms: 500, p99_ms: 1000, samples: requests },
+        slow_paths: [
+          { path: "GET /api/reports/export", requests: 18, s5xx: 1, avg_ms: 3_420 },
+          { path: "POST /api/checkout", requests: 140, s5xx: 2, avg_ms: 1_180 },
+        ],
+        top_hosts: [{ key: "shop.example.com", requests: Math.round(requests * 0.8) }, { key: "api.example.com", requests: Math.round(requests * 0.2) }],
+        user_agents: [{ key: "browser", requests: Math.round(requests * 0.72) }, { key: "bot", requests: Math.round(requests * 0.14) }, { key: "tool", requests: Math.round(requests * 0.13) }, { key: "scanner", requests: Math.round(requests * 0.01) }],
+        suspicious: [{ ip: "192.0.2.66", requests: 212, s4xx: 205, scan: 190 }],
       },
     }, 250);
   },

@@ -17,6 +17,10 @@ const pages: Record<string, ComponentType> = {
   settings: lazy(() => import('@/pages/settings')),
   alerts: lazy(() => import('@/pages/alerts')),
   packages: lazy(() => import('@/pages/packages')),
+  nginx: lazy(() => import('@/pages/nginx')),
+  firewall: lazy(() => import('@/pages/firewall')),
+  ssh: lazy(() => import('@/pages/ssh')),
+  ops: lazy(() => import('@/pages/ops-log')),
 }
 
 const Wall = lazy(() => import('@/pages/wall'))

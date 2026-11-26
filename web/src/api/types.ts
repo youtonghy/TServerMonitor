@@ -232,10 +232,21 @@ export interface AccessStats {
   /** [2xx, 3xx, 4xx, 5xx] */
   status: [number, number, number, number];
   error_rate_5xx: number; bytes: number;
-  series: { ts: number; requests: number; s4xx: number; s5xx: number }[];
-  top_paths: { path: string; requests: number; s5xx: number }[];
-  top_ips: { ip: string; requests: number }[];
+  series: { ts: number; requests: number; s4xx: number; s5xx: number; p95_ms?: number | null }[];
+  top_paths: AccessPath[];
+  top_ips: AccessIp[];
+  /** null when the log format has no $request_time. */
+  latency?: { p50_ms: number; p95_ms: number; p99_ms: number; samples: number } | null;
+  slow_paths?: AccessPath[];
+  top_hosts?: { key: string; requests: number }[];
+  /** browser | bot | tool | scanner | empty | other */
+  user_agents?: { key: string; requests: number }[];
+  /** Addresses probing scanner paths or getting mostly 4xx. */
+  suspicious?: AccessIp[];
 }
+export interface AccessPath { path: string; requests: number; s5xx: number; avg_ms?: number | null }
+export interface AccessIp { ip: string; requests: number; s4xx?: number; scan?: number }
+export type AccessRange = "1h" | "6h" | "24h" | "7d" | "30d";
 export interface AccessResponse { sources: string[]; stats: AccessStats }
 
 // Package updates
@@ -295,5 +306,71 @@ export interface StreamEventMap {
   report: ReportSummary;
   settings: { generation: number };
   package_job: { id: number; status: PackageJob["status"]; line: string | null };
+  ops_job: { id: number; status: OpsJob["status"]; line: string | null };
+  ops_pending: PendingChange[];
 }
 export type StreamEventName = keyof StreamEventMap;
+
+// Server management through the optional root ops helper
+
+export type OpsDomain = "docker" | "nginx" | "firewall" | "ssh";
+export interface OpsDomainCaps { enabled: boolean; allow: string[]; backend?: string | null }
+export interface OpsCapabilities {
+  /** The helper answered. */
+  available: boolean; reason: string | null; version: string | null;
+  dry_run: boolean; confirm_secs: number;
+  /** Changes can be submitted (helper + ops token + sandbox isolation). */
+  write_ready: boolean; write_reason: string | null;
+  domains: Partial<Record<OpsDomain, OpsDomainCaps>>;
+  ops_token_env: string;
+}
+export type OpsJobStatus = "running" | "succeeded" | "failed" | "unknown";
+export interface OpsJob {
+  id: number; domain: string; call: string; summary: string; args: unknown; dry_run: boolean;
+  via: "web" | "mcp" | string; remote: string | null; status: OpsJobStatus; error: string | null;
+  result: Record<string, unknown> | null; log?: string; started_at: number; finished_at: number | null;
+}
+export interface AuditEntry {
+  id: number; ts: number; via: string; remote: string | null; call: string; summary: string;
+  dry_run: boolean; outcome: "started" | "succeeded" | "failed" | "refused"; detail: string | null; job_id: number | null;
+}
+export interface PendingChange { id: string; domain: string; summary: string; created_at: number; deadline: number; via: string }
+/** Reads come from the helper, or from what the daemon can see itself. */
+export interface OpsRead<T> { source: "helper" | "local"; data: T }
+
+export interface DockerContainer {
+  id: string; name: string; image: string; state: string; status: string;
+  project: string | null; service: string | null; protected: boolean;
+}
+export interface DockerProject { name: string; working_dir: string | null; services: string[]; containers: string[]; running: number; total: number }
+export interface DockerInventory { projects: DockerProject[]; containers: DockerContainer[] }
+export interface DockerImage { id: string; tags: string[]; size: number; created: number; containers: number; dangling: boolean }
+export interface DockerVolume { name: string; driver: string; project: string | null; in_use: boolean }
+export interface DockerNetwork { id: string; name: string; driver: string; scope: string; internal: boolean }
+
+export interface NginxSite {
+  name: string; file: string; enabled: boolean; layout: "sites_enabled" | "conf_d";
+  server_names: string[]; listen: string[]; ssl: boolean;
+}
+export interface NginxSites { layout: "sites_enabled" | "conf_d"; sites: NginxSite[] }
+export interface NginxFileEntry { path: string; size: number; editable: boolean }
+export interface NginxFile { path: string; content: string; sha256: string; editable: boolean }
+
+export interface FirewallRule { spec: string; action: string; port: string | null; proto: string | null; from: string | null; deletable: boolean }
+export interface FirewallStatus {
+  backend: string; active: boolean; default_incoming: string | null; zone: string | null;
+  rules: FirewallRule[]; raw: string; ssh_ports: number[]; notes: string[]; writable: boolean;
+}
+export interface NewFirewallRule { action: "allow" | "deny" | "reject" | "limit"; port: string; proto: "tcp" | "udp" | "any"; from?: string | null }
+
+export interface SshOption { key: string; values: string[] }
+export interface SshConfig {
+  /** sshd -T worked (needs the helper). */
+  available: boolean;
+  effective: Record<string, string[]>; ports: number[]; managed: Record<string, string>;
+  dropin?: string; includes_dropins: boolean; unit?: string; socket_activated?: boolean;
+  options: SshOption[];
+}
+export interface SshKey { user: string; kind: string; fingerprint: string; comment: string; restricted: boolean }
+export interface SshKeys { users: string[]; keys: SshKey[] }
+export interface SshSession { user: string; tty: string; since: string; from: string | null }

@@ -3,6 +3,7 @@ import type {
   Finding, LogCluster, LogRatesResponse, LogSource, MetricsRange, MetricsResponse, ModelsRequest, PortInfo,
   AccessResponse, ChannelInput, PackageJob, PackageOp, PackagesResponse, ChannelsResponse, Prompt, PromptInput, ProviderInput, ProvidersResponse, TaskInput, TasksResponse, Report, ReportKind, ReportSummary, Route, RoutingResponse, Snapshot,
   StatusResponse, TriggerResponse,
+  AccessRange, AccessStats, AuditEntry, OpsCapabilities, OpsJob, OpsRead, PendingChange, SshSession,
 } from "./types";
 
 export const MOCK = import.meta.env.VITE_MOCK === "1";
@@ -58,6 +59,36 @@ export function onUnauthorized(listener: Listener): () => void {
 
 export function notifyUnauthorized(): void {
   unauthorizedListeners.forEach(listener => listener());
+}
+
+// Ops token: kept in memory only (never localStorage, never a URL); re-entered after a reload.
+
+let opsToken: string | null = null;
+const opsTokenListeners = new Set<Listener>();
+const opsTokenNeededListeners = new Set<Listener>();
+
+export function getOpsToken(): string | null {
+  return opsToken;
+}
+
+export function setOpsToken(token: string | null): void {
+  opsToken = token;
+  opsTokenListeners.forEach(listener => listener());
+}
+
+export function onOpsTokenChange(listener: Listener): () => void {
+  opsTokenListeners.add(listener);
+  return () => opsTokenListeners.delete(listener);
+}
+
+/** Called when a management request is refused for a missing or wrong ops token. */
+export function onOpsTokenNeeded(listener: Listener): () => void {
+  opsTokenNeededListeners.add(listener);
+  return () => opsTokenNeededListeners.delete(listener);
+}
+
+export function notifyOpsTokenNeeded(): void {
+  opsTokenNeededListeners.forEach(listener => listener());
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -154,6 +185,28 @@ export interface Api {
   packageJobs(): Promise<PackageJob[]>;
   packageJob(id: number): Promise<PackageJob>;
   startPackageJob(op: PackageOp, packages?: string[]): Promise<{ id: number }>;
+  accessHistory(range: AccessRange): Promise<AccessStats>;
+  opsCapabilities(): Promise<OpsCapabilities>;
+  opsJobs(domain?: string, limit?: number): Promise<OpsJob[]>;
+  opsJob(id: number): Promise<OpsJob>;
+  opsAudit(limit?: number): Promise<AuditEntry[]>;
+  opsPending(): Promise<PendingChange[]>;
+  /** Helper read with local fallback, e.g. opsRead("nginx.file", { path }). */
+  opsRead<T>(call: string, params?: Record<string, string>): Promise<OpsRead<T>>;
+  /** Starts a change (needs the ops token); waits up to ~20 s and returns the job. */
+  opsRun(call: string, args?: Record<string, unknown>, dryRun?: boolean): Promise<OpsJob>;
+  sshSessions(): Promise<SshSession[]>;
+}
+
+async function opsRun(call: string, args: Record<string, unknown> = {}, dryRun = false): Promise<OpsJob> {
+  const headers: Record<string, string> = {};
+  if (opsToken) headers["X-TSM-Ops-Token"] = opsToken;
+  try {
+    return await request<OpsJob>("/ops/run", { method: "POST", headers, body: JSON.stringify({ call, args, dry_run: dryRun }) });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 403 && error.message.includes("运维令牌")) notifyOpsTokenNeeded();
+    throw error;
+  }
 }
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -215,6 +268,15 @@ const httpApi: Api = {
   packageJobs: () => request("/packages/jobs"),
   packageJob: id => request(`/packages/jobs/${id}`),
   startPackageJob: (op, packages = []) => request("/packages/jobs", json("POST", { op, packages })),
+  accessHistory: range => request(`/access/history${query({ range })}`),
+  opsCapabilities: () => request("/ops/capabilities"),
+  opsJobs: (domain, limit = 30) => request(`/ops/jobs${query({ domain, limit })}`),
+  opsJob: id => request(`/ops/jobs/${id}`),
+  opsAudit: (limit = 100) => request(`/ops/audit${query({ limit })}`),
+  opsPending: () => request("/ops/pending"),
+  opsRead: <T,>(call: string, params: Record<string, string> = {}) => request<OpsRead<T>>(`/ops/read/${encodeURIComponent(call)}${query(params)}`),
+  opsRun,
+  sshSessions: () => request("/ssh/sessions"),
 };
 
 /**

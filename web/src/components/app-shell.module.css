@@ -34,6 +34,14 @@
 .nav { flex: 1; min-height: 0; overflow-y: auto; }
 
 .navList { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.navGroup { display: grid; gap: 4px; }
+.navGroup + .navGroup { margin-top: 16px; }
+.navGroupLabel {
+  margin: 0;
+  padding: 0 12px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
 
 .navLink {
   display: flex;

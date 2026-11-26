@@ -1,0 +1,59 @@
+.muted { margin: 0; color: var(--text-secondary); font-size: var(--text-sm); }
+
+.result { display: grid; gap: 10px; }
+.resultHead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.resultTitle { min-width: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
+
+.linkButton {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+@media (hover: hover) and (pointer: fine) {
+  .linkButton:hover { color: var(--foreground); }
+}
+
+/* Wider dialog for diffs and forms with previews. Doubled class beats the base width. */
+.wide.wide { width: min(calc(100vw - var(--space-8)), 760px); }
+
+.confirmBody { display: grid; gap: 16px; }
+.confirmActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+
+/* Pending confirm-or-revert changes, pinned above every page. */
+.banner {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--border));
+  border-radius: var(--radius-surface);
+  background: color-mix(in oklab, var(--warning) 9%, var(--surface));
+}
+.bannerRow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.bannerText { display: grid; flex: 1 1 260px; gap: 2px; min-width: 0; }
+.bannerTitle { font-weight: 500; overflow-wrap: anywhere; }
+.bannerHint { color: var(--text-secondary); font-size: var(--text-sm); }
+.countdown { font-variant-numeric: tabular-nums; font-family: var(--font-mono, ui-monospace, monospace); }
+.bannerActions { display: flex; gap: 8px; }
+
+.editor {
+  min-height: 320px;
+  max-height: 62vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  font-size: var(--text-sm);
+}
+.editor :global(.cm-editor) { min-height: 320px; background: transparent; color: var(--foreground); }
+.editor :global(.cm-editor.cm-focused) { outline: none; }
+.editor:focus-within { border-color: var(--accent); }
+.editor :global(.cm-gutters) { border-right: 1px solid var(--border-subtle); background: var(--surface-muted); color: var(--text-muted); }
+.editor :global(.cm-activeLine), .editor :global(.cm-activeLineGutter) { background: color-mix(in oklab, var(--accent) 7%, transparent); }
+.editor :global(.cm-content) { font-family: var(--font-mono, ui-monospace, monospace); caret-color: var(--foreground); }
+.editor :global(.cm-selectionBackground), .editor :global(.cm-editor.cm-focused .cm-selectionBackground) { background: color-mix(in oklab, var(--accent) 26%, transparent) !important; }
