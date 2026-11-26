@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod alerts;
 pub mod api;
+pub mod auth;
 pub mod channels;
 pub mod collect;
 pub mod config;

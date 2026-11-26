@@ -75,56 +75,25 @@ type ApiResult<T> = Result<Json<T>, ApiError>;
 
 // ---------------------------------------------------------------- auth
 
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
+/// Error with a machine-readable `code` (login_required, setup_required, sudo_required, ...).
+pub struct Coded(StatusCode, &'static str, String);
 
-#[derive(Deserialize)]
-struct TokenQuery {
-    token: Option<String>,
-}
-
-async fn auth(State(state): State<Shared>, req: Request, next: Next) -> Response {
-    let Some(expected) = crate::config::secret(&state.cfg.server.token_env) else {
-        return next.run(req).await;
-    };
-    let header_token = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string);
-    // EventSource cannot send headers, so the stream also accepts ?token=
-    let query_token = (req.uri().path() == "/api/v1/stream")
-        .then(|| {
-            Query::<TokenQuery>::try_from_uri(req.uri())
-                .ok()
-                .and_then(|q| q.0.token)
-        })
-        .flatten();
-    match header_token.or(query_token) {
-        Some(t) if ct_eq(t.as_bytes(), expected.as_bytes()) => next.run(req).await,
-        _ => ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()).into_response(),
+impl IntoResponse for Coded {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({ "error": self.2, "code": self.1 }))).into_response()
     }
 }
 
-/// Admin routes: a token must be configured, and browsers must not call cross-origin.
-async fn require_admin(State(state): State<Shared>, req: Request, next: Next) -> Response {
-    if crate::config::secret(&state.cfg.server.token_env).is_none() {
-        return ApiError(
-            StatusCode::FORBIDDEN,
-            format!(
-                "写操作需要先设置访问令牌（环境变量 {}）",
-                state.cfg.server.token_env
-            ),
-        )
-        .into_response();
+impl From<ApiError> for Coded {
+    fn from(e: ApiError) -> Self {
+        Coded(e.0, "error", e.1)
     }
-    if !same_origin(req.headers()) {
-        return ApiError(StatusCode::FORBIDDEN, "cross-origin request refused".into())
-            .into_response();
+}
+
+impl From<anyhow::Error> for Coded {
+    fn from(e: anyhow::Error) -> Self {
+        ApiError::from(e).into()
     }
-    next.run(req).await
 }
 
 /// Client address for the audit log: the TCP peer, or the first X-Forwarded-For hop when the
@@ -132,11 +101,18 @@ async fn require_admin(State(state): State<Shared>, req: Request, next: Next) ->
 #[derive(Clone)]
 pub struct RemoteAddr(pub Option<String>);
 
-pub fn remote_of(req: &Request) -> Option<String> {
-    let peer = req
-        .extensions()
+/// Whether the TCP peer is on this host (a local reverse proxy may then set forwarded headers).
+#[derive(Clone, Copy)]
+pub struct PeerLoopback(pub bool);
+
+fn peer_ip(req: &Request) -> Option<std::net::IpAddr> {
+    req.extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.ip());
+        .map(|c| c.0.ip())
+}
+
+pub fn remote_of(req: &Request) -> Option<String> {
+    let peer = peer_ip(req);
     let fwd = req
         .headers()
         .get("x-forwarded-for")
@@ -151,39 +127,111 @@ pub fn remote_of(req: &Request) -> Option<String> {
     }
 }
 
-/// Management routes (web and `/mcp/ops`): the separate ops token must be configured and sent
-/// in `X-TSM-Ops-Token`; browsers must not call cross-origin. The regular API token is still
-/// checked by [`auth`] in front of this.
-pub async fn require_ops(State(state): State<Shared>, mut req: Request, next: Next) -> Response {
-    let Some(expected) = crate::config::secret(&state.cfg.server.ops_token_env) else {
-        return ApiError(
+/// Runs for every API request: resolves the caller (session cookie, API token or the deprecated
+/// environment tokens) and refuses cross-origin writes from browsers.
+async fn identify(State(state): State<Shared>, mut req: Request, next: Next) -> Response {
+    let principal = crate::auth::identify(&state, req.headers()).await;
+    let writes = !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    // cookies ride along on cross-site requests; machine tokens do not
+    if writes && principal.as_ref().is_none_or(|p| p.is_user()) && !same_origin(req.headers()) {
+        return Coded(
             StatusCode::FORBIDDEN,
-            format!(
-                "管理操作需要先设置运维令牌（环境变量 {}）",
-                state.cfg.server.ops_token_env
-            ),
-        )
-        .into_response();
-    };
-    if !same_origin(req.headers()) {
-        return ApiError(StatusCode::FORBIDDEN, "cross-origin request refused".into())
-            .into_response();
-    }
-    let given = req
-        .headers()
-        .get("x-tsm-ops-token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    if !ct_eq(given.as_bytes(), expected.as_bytes()) {
-        return ApiError(
-            StatusCode::FORBIDDEN,
-            "运维令牌无效或缺失（X-TSM-Ops-Token）".into(),
+            "cross_origin",
+            "cross-origin request refused".into(),
         )
         .into_response();
     }
     let remote = remote_of(&req);
+    let loopback = peer_ip(&req).is_some_and(|ip| ip.is_loopback());
     req.extensions_mut().insert(RemoteAddr(remote));
+    req.extensions_mut().insert(PeerLoopback(loopback));
+    if let Some(p) = principal {
+        req.extensions_mut().insert(p);
+    }
     next.run(req).await
+}
+
+fn principal_of(req: &Request) -> Option<&crate::auth::Principal> {
+    req.extensions().get::<crate::auth::Principal>()
+}
+
+fn login_required(state: &Shared) -> Response {
+    if crate::auth::setup_required(state) {
+        Coded(
+            StatusCode::UNAUTHORIZED,
+            "setup_required",
+            "请先完成初始化，创建管理员账号".into(),
+        )
+        .into_response()
+    } else {
+        Coded(
+            StatusCode::UNAUTHORIZED,
+            "login_required",
+            "需要登录".into(),
+        )
+        .into_response()
+    }
+}
+
+/// Everything except the public auth endpoints and the static dashboard.
+async fn require_login(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    if principal_of(&req).is_none() {
+        return login_required(&state);
+    }
+    next.run(req).await
+}
+
+/// Account endpoints: a signed-in person, not a token.
+async fn require_user(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    match principal_of(&req) {
+        Some(p) if p.is_user() => next.run(req).await,
+        Some(_) => Coded(
+            StatusCode::FORBIDDEN,
+            "user_required",
+            "只能由登录的账号操作".into(),
+        )
+        .into_response(),
+        None => login_required(&state),
+    }
+}
+
+/// Changes to TServerMonitor's own settings: a signed-in account (or the deprecated
+/// TSM_API_TOKEN).
+async fn require_admin(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    match principal_of(&req) {
+        Some(p) if p.can_admin() => next.run(req).await,
+        Some(_) => Coded(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "API 令牌不能修改设置，请登录面板操作".into(),
+        )
+        .into_response(),
+        None => login_required(&state),
+    }
+}
+
+/// Server changes (web and `/mcp/ops`): an account that confirmed its password in the last
+/// ten minutes, or an API token with the `ops` scope (or the deprecated TSM_OPS_TOKEN).
+pub async fn require_ops(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    match principal_of(&req) {
+        Some(p) if p.can_ops(now_ms()) => next.run(req).await,
+        Some(p) if p.is_user() => Coded(
+            StatusCode::FORBIDDEN,
+            "sudo_required",
+            "修改服务器前请先确认密码".into(),
+        )
+        .into_response(),
+        Some(_) => Coded(
+            StatusCode::FORBIDDEN,
+            "scope_required",
+            "需要 ops 范围的 API 令牌".into(),
+        )
+        .into_response(),
+        None => login_required(&state),
+    }
 }
 
 /// True when there is no Origin header (non-browser client) or it matches Host.
@@ -1206,18 +1254,7 @@ async fn get_ops_read(
     Query(q): Query<std::collections::BTreeMap<String, String>>,
 ) -> ApiResult<Value> {
     let args = json!(q);
-    let mut v = crate::ops::read(&state, &call, args).await?;
-    // Without an API token, reads are open to any local process. Config text read by the root
-    // helper may hold secrets the daemon user could not read itself, so it is redacted (and
-    // therefore not editable) unless the dashboard is protected by a token.
-    if call == "nginx.file"
-        && crate::config::secret(&state.cfg.server.token_env).is_none()
-        && let Some(c) = v["data"]["content"].as_str()
-    {
-        v["data"]["content"] = crate::ops::redact_config(c).into();
-        v["data"]["editable"] = false.into();
-    }
-    Ok(Json(v))
+    Ok(Json(crate::ops::read(&state, &call, args).await?))
 }
 
 async fn get_ssh_sessions() -> ApiResult<Value> {
@@ -1239,6 +1276,7 @@ struct OpsRun {
 async fn post_ops_run(
     State(state): State<Shared>,
     axum::Extension(remote): axum::Extension<RemoteAddr>,
+    axum::Extension(who): axum::Extension<crate::auth::Principal>,
     Json(r): Json<OpsRun>,
 ) -> ApiResult<crate::ops::Job> {
     let summary = crate::ops::calls::summary(&r.call, &r.args);
@@ -1252,6 +1290,7 @@ async fn post_ops_run(
             via: crate::ops::Via {
                 via: "web",
                 remote: remote.0,
+                actor: who.actor(),
             },
         },
     )
@@ -1260,6 +1299,292 @@ async fn post_ops_run(
         .await?
         .map(Json)
         .ok_or_else(|| not_found("job"))
+}
+
+// ---------------------------------------------------------------- accounts
+
+use crate::auth::{self as authn, Principal};
+
+type AuthResult<T> = Result<Json<T>, Coded>;
+
+fn user_of(p: &Principal) -> (i64, &str, &str) {
+    match p {
+        Principal::User {
+            id,
+            username,
+            session,
+            ..
+        } => (*id, username.as_str(), session.as_str()),
+        // require_user guarantees a session
+        _ => (0, "", ""),
+    }
+}
+
+fn need_sudo(p: &Principal) -> Result<(), Coded> {
+    if p.can_ops(now_ms()) {
+        Ok(())
+    } else {
+        Err(Coded(
+            StatusCode::FORBIDDEN,
+            "sudo_required",
+            "此操作需要先确认密码".into(),
+        ))
+    }
+}
+
+fn with_cookie<T: serde::Serialize>(cookie: String, body: T) -> Response {
+    ([(header::SET_COOKIE, cookie)], Json(body)).into_response()
+}
+
+async fn get_auth_state(State(state): State<Shared>, req: Request) -> Json<Value> {
+    let p = principal_of(&req);
+    let (user, kind, sudo_until) = match p {
+        Some(Principal::User {
+            id,
+            username,
+            sudo_until,
+            ..
+        }) => (
+            json!({ "id": id, "username": username }),
+            "session",
+            *sudo_until,
+        ),
+        Some(Principal::Token { name, scope, .. }) => {
+            (json!({ "token": name, "scope": scope }), "token", 0)
+        }
+        Some(Principal::Legacy { .. }) => (Value::Null, "legacy", 0),
+        None => (Value::Null, "", 0),
+    };
+    Json(json!({
+        "setup_required": authn::setup_required(&state),
+        "authenticated": p.is_some(),
+        "kind": if kind.is_empty() { Value::Null } else { json!(kind) },
+        "user": user,
+        "sudo_until": sudo_until,
+    }))
+}
+
+#[derive(Deserialize)]
+struct SetupBody {
+    code: String,
+    username: String,
+    password: String,
+}
+
+async fn post_setup(
+    State(state): State<Shared>,
+    axum::Extension(remote): axum::Extension<RemoteAddr>,
+    axum::Extension(lo): axum::Extension<PeerLoopback>,
+    headers: HeaderMap,
+    Json(b): Json<SetupBody>,
+) -> Result<Response, Coded> {
+    if !authn::setup_required(&state) {
+        return Err(Coded(
+            StatusCode::CONFLICT,
+            "already_setup",
+            "已经完成初始化".into(),
+        ));
+    }
+    let remote = remote.0.unwrap_or_default();
+    let id = authn::setup(&state, &b.code, &b.username, &b.password, &remote).await?;
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let cookie = authn::create_session(&state, id, &remote, ua).await?;
+    let secure = authn::secure_request(&state, &headers, lo.0);
+    Ok(with_cookie(
+        authn::session_cookie(&state, &cookie, secure),
+        json!({ "ok": true }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct LoginBody {
+    username: String,
+    password: String,
+}
+
+async fn post_login(
+    State(state): State<Shared>,
+    axum::Extension(remote): axum::Extension<RemoteAddr>,
+    axum::Extension(lo): axum::Extension<PeerLoopback>,
+    headers: HeaderMap,
+    Json(b): Json<LoginBody>,
+) -> Result<Response, Coded> {
+    if authn::setup_required(&state) {
+        return Err(Coded(
+            StatusCode::UNAUTHORIZED,
+            "setup_required",
+            "请先完成初始化".into(),
+        ));
+    }
+    let remote = remote.0.unwrap_or_default();
+    let user = authn::login(&state, &b.username, &b.password, &remote)
+        .await
+        .map_err(|e| {
+            Coded(
+                StatusCode::UNAUTHORIZED,
+                "bad_credentials",
+                ApiError::from(e).1,
+            )
+        })?;
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let cookie = authn::create_session(&state, user.id, &remote, ua).await?;
+    let secure = authn::secure_request(&state, &headers, lo.0);
+    Ok(with_cookie(
+        authn::session_cookie(&state, &cookie, secure),
+        json!({ "user": { "id": user.id, "username": user.username } }),
+    ))
+}
+
+async fn post_logout(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    axum::Extension(lo): axum::Extension<PeerLoopback>,
+    headers: HeaderMap,
+) -> Result<Response, Coded> {
+    let (_, _, session) = user_of(&p);
+    authn::delete_session(&state.db, session).await?;
+    let secure = authn::secure_request(&state, &headers, lo.0);
+    Ok(with_cookie(
+        authn::session_cookie(&state, "", secure),
+        json!({ "ok": true }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PasswordBody {
+    password: String,
+}
+
+async fn post_sudo(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    axum::Extension(remote): axum::Extension<RemoteAddr>,
+    Json(b): Json<PasswordBody>,
+) -> AuthResult<Value> {
+    let (id, _, session) = user_of(&p);
+    let until = authn::sudo(
+        &state,
+        id,
+        session,
+        &b.password,
+        &remote.0.unwrap_or_default(),
+    )
+    .await?;
+    Ok(Json(json!({ "sudo_until": until })))
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordBody {
+    current: String,
+    new: String,
+}
+
+async fn post_password(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    Json(b): Json<ChangePasswordBody>,
+) -> AuthResult<Value> {
+    let (id, _, session) = user_of(&p);
+    authn::change_password(&state, id, session, &b.current, &b.new).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn get_sessions(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+) -> AuthResult<Vec<authn::SessionView>> {
+    let (id, _, session) = user_of(&p);
+    Ok(Json(authn::list_sessions(&state.db, id, session).await?))
+}
+
+async fn delete_session(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    Path(sid): Path<String>,
+) -> AuthResult<Value> {
+    let (id, _, _) = user_of(&p);
+    authn::revoke_session(&state.db, id, &sid).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn get_users(State(state): State<Shared>) -> AuthResult<Vec<authn::User>> {
+    Ok(Json(authn::list_users(&state.db).await?))
+}
+
+#[derive(Deserialize)]
+struct NewUserBody {
+    username: String,
+    password: String,
+}
+
+async fn post_user(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    Json(b): Json<NewUserBody>,
+) -> AuthResult<Value> {
+    need_sudo(&p)?;
+    let id = authn::create_user(&state.db, &b.username, &b.password).await?;
+    tracing::info!("account {:?} created by {}", b.username, p.actor());
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn delete_user(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    Path(id): Path<i64>,
+) -> AuthResult<Value> {
+    need_sudo(&p)?;
+    let (me, _, _) = user_of(&p);
+    authn::delete_user(&state.db, id, me).await?;
+    tracing::info!("account {id} deleted by {}", p.actor());
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn get_tokens(State(state): State<Shared>) -> AuthResult<Vec<authn::ApiToken>> {
+    Ok(Json(authn::list_tokens(&state.db).await?))
+}
+
+#[derive(Deserialize)]
+struct NewTokenBody {
+    name: String,
+    scope: String,
+    expires_days: Option<i64>,
+}
+
+async fn post_token(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    Json(b): Json<NewTokenBody>,
+) -> AuthResult<Value> {
+    need_sudo(&p)?;
+    let scope = authn::Scope::parse(&b.scope)
+        .ok_or_else(|| Coded::from(bad_request("scope 只能是 read 或 ops")))?;
+    let (me, _, _) = user_of(&p);
+    let (plain, record) =
+        authn::create_token(&state.db, &b.name, scope, b.expires_days, me).await?;
+    tracing::info!(
+        "API token {:?} ({}) created by {}",
+        record.name,
+        record.scope,
+        p.actor()
+    );
+    Ok(Json(json!({ "token": plain, "record": record })))
+}
+
+async fn delete_token(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    Path(id): Path<i64>,
+) -> AuthResult<Value> {
+    need_sudo(&p)?;
+    authn::revoke_token(&state.db, id).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---------------------------------------------------------------- static dashboard
@@ -1308,6 +1633,33 @@ async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
 }
 
 pub fn router(state: Shared) -> Router {
+    let public = Router::new()
+        .route("/api/v1/auth/state", get(get_auth_state))
+        .route("/api/v1/auth/setup", post(post_setup))
+        .route("/api/v1/auth/login", post(post_login));
+    let account = Router::new()
+        .route("/api/v1/auth/logout", post(post_logout))
+        .route("/api/v1/auth/sudo", post(post_sudo))
+        .route("/api/v1/auth/password", post(post_password))
+        .route("/api/v1/auth/sessions", get(get_sessions))
+        .route(
+            "/api/v1/auth/sessions/{id}",
+            axum::routing::delete(delete_session),
+        )
+        .route("/api/v1/auth/users", get(get_users).post(post_user))
+        .route(
+            "/api/v1/auth/users/{id}",
+            axum::routing::delete(delete_user),
+        )
+        .route("/api/v1/auth/tokens", get(get_tokens).post(post_token))
+        .route(
+            "/api/v1/auth/tokens/{id}",
+            axum::routing::delete(delete_token),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_user,
+        ));
     let api = Router::new()
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/snapshot", get(get_snapshot))
@@ -1348,7 +1700,11 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/ops/pending", get(get_ops_pending))
         .route("/api/v1/ops/read/{call}", get(get_ops_read))
         .route("/api/v1/ssh/sessions", get(get_ssh_sessions))
-        .nest_service("/mcp", crate::mcp::service(state.clone(), false));
+        .nest_service("/mcp", crate::mcp::service(state.clone(), false))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_login,
+        ));
     let ops = Router::new()
         .route("/api/v1/ops/run", post(post_ops_run))
         .nest_service("/mcp/ops", crate::mcp::service(state.clone(), true))
@@ -1395,9 +1751,15 @@ pub fn router(state: Shared) -> Router {
             state.clone(),
             require_admin,
         ));
-    api.merge(admin)
+    public
+        .merge(account)
+        .merge(api)
+        .merge(admin)
         .merge(ops)
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            identify,
+        ))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -1417,68 +1779,187 @@ mod tests {
         assert!(!same_origin(&h));
     }
 
-    #[test]
-    fn constant_time_eq() {
-        assert!(ct_eq(b"abc", b"abc"));
-        assert!(!ct_eq(b"abc", b"abd"));
-        assert!(!ct_eq(b"abc", b"abcd"));
+    const PW: &str = "correct horse battery";
+
+    struct App {
+        base: String,
+        state: Shared,
+        _dir: tempfile::TempDir,
     }
 
-    async fn serve(token_env: &str) -> String {
+    async fn app(edit: impl FnOnce(&mut crate::config::Config)) -> App {
+        let dir = tempfile::tempdir().unwrap();
         let mut cfg = crate::config::Config::default();
-        cfg.server.token_env = token_env.into();
+        cfg.storage.data_dir = dir.path().to_path_buf();
+        cfg.server.token_env = "TSM_TEST_API_TOKEN_UNSET".into();
+        cfg.server.ops_token_env = "TSM_TEST_OPS_TOKEN_UNSET".into();
+        edit(&mut cfg);
         let state = crate::state::AppState::new(
             std::sync::Arc::new(cfg),
             crate::store::open_memory().await,
         );
+        crate::auth::init(&state).await.unwrap();
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(l, router(state)).await.unwrap() });
-        format!("http://{addr}")
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let st = state.clone();
+        tokio::spawn(async move { axum::serve(l, router(st)).await.unwrap() });
+        App {
+            base,
+            state,
+            _dir: dir,
+        }
     }
 
-    #[tokio::test]
-    async fn admin_routes_need_configured_token() {
-        let base = serve("TSM_TEST_API_TOKEN_UNSET").await;
-        let c = reqwest::Client::new();
-        // reads stay open when no token is configured
-        let r = c
-            .get(format!("{base}/api/v1/settings/providers"))
+    /// Creates the account directly (no wizard) and signs in; returns the Cookie header value.
+    async fn admin(a: &App) -> String {
+        crate::auth::create_user(&a.state.db, "admin", PW)
+            .await
+            .unwrap();
+        crate::auth::init(&a.state).await.unwrap();
+        login(a, "admin", PW).await
+    }
+
+    async fn login(a: &App, user: &str, pw: &str) -> String {
+        let r = reqwest::Client::new()
+            .post(format!("{}/api/v1/auth/login", a.base))
+            .json(&json!({ "username": user, "password": pw }))
             .send()
             .await
             .unwrap();
+        assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+        cookie_of(&r)
+    }
+
+    fn cookie_of(r: &reqwest::Response) -> String {
+        let c = r
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            c.contains("HttpOnly") && c.contains("SameSite=Strict"),
+            "{c}"
+        );
+        c.split(';').next().unwrap().to_string()
+    }
+
+    async fn code(r: reqwest::Response) -> (u16, String) {
+        let s = r.status().as_u16();
+        let v: Value = r.json().await.unwrap_or(Value::Null);
+        (s, v["code"].as_str().unwrap_or_default().to_string())
+    }
+
+    #[tokio::test]
+    async fn setup_wizard_login_and_logout() {
+        let a = app(|_| {}).await;
+        let c = reqwest::Client::new();
+        let get = |path: &str, cookie: Option<&str>| {
+            let mut r = c.get(format!("{}{path}", a.base));
+            if let Some(k) = cookie {
+                r = r.header(header::COOKIE, k);
+            }
+            r.send()
+        };
+        // before setup everything but the auth endpoints is closed
+        assert_eq!(
+            code(get("/api/v1/status", None).await.unwrap()).await,
+            (401, "setup_required".into())
+        );
+        let st: Value = get("/api/v1/auth/state", None)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(st["setup_required"], true);
+        assert_eq!(st["authenticated"], false);
+        // the dashboard itself is still served
+        assert_ne!(get("/", None).await.unwrap().status(), 401);
+
+        let setup = |code: &str, user: &str| {
+            c.post(format!("{}/api/v1/auth/setup", a.base))
+                .json(&json!({ "code": code, "username": user, "password": PW }))
+                .send()
+        };
+        assert_eq!(setup("WRONG", "admin").await.unwrap().status(), 400);
+        let setup_code = std::fs::read_to_string(crate::auth::setup_code_path(&a.state)).unwrap();
+        let r = setup(setup_code.trim(), "admin").await.unwrap();
         assert_eq!(r.status(), 200);
+        let cookie = cookie_of(&r);
+        assert_eq!(
+            get("/api/v1/status", Some(&cookie)).await.unwrap().status(),
+            200
+        );
+        let st: Value = get("/api/v1/auth/state", Some(&cookie))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(st["user"]["username"], "admin");
+        assert_eq!(st["kind"], "session");
+        // the wizard cannot run twice
+        assert_eq!(
+            setup(setup_code.trim(), "evil").await.unwrap().status(),
+            409
+        );
+
         let r = c
-            .post(format!("{base}/api/v1/settings/providers"))
-            .json(&json!({}))
+            .post(format!("{}/api/v1/auth/logout", a.base))
+            .header(header::COOKIE, &cookie)
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status(), 403);
+        assert!(
+            r.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("Max-Age=0")
+        );
+        assert_eq!(
+            code(get("/api/v1/status", Some(&cookie)).await.unwrap()).await,
+            (401, "login_required".into())
+        );
+        // the old ?token= form is gone
+        assert_eq!(
+            get("/api/v1/stream?token=x", None).await.unwrap().status(),
+            401
+        );
+        let r = c
+            .post(format!("{}/api/v1/auth/login", a.base))
+            .json(&json!({ "username": "admin", "password": "wrong password!" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401);
+        login(&a, "admin", PW).await;
     }
 
     #[tokio::test]
-    async fn admin_routes_check_token_and_origin() {
-        // SAFETY: unique variable name for this test.
-        unsafe { std::env::set_var("TSM_TEST_API_TOKEN_SET", "t0k") };
-        let base = serve("TSM_TEST_API_TOKEN_SET").await;
+    async fn settings_writes_need_an_account_and_same_origin() {
+        let a = app(|_| {}).await;
+        let cookie = admin(&a).await;
         let c = reqwest::Client::new();
-        let url = format!("{base}/api/v1/settings/providers");
-        let r = c.post(&url).json(&json!({})).send().await.unwrap();
-        assert_eq!(r.status(), 401);
+        let url = format!("{}/api/v1/settings/providers", a.base);
+        assert_eq!(
+            c.post(&url).json(&json!({})).send().await.unwrap().status(),
+            401
+        );
         let r = c
             .post(&url)
-            .bearer_auth("t0k")
-            .header("origin", "https://evil.example")
-            .json(&json!({}))
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, "https://evil.example")
+            .json(&json!({ "name": "x" }))
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status(), 403);
-        // authorized: reaches validation
+        assert_eq!(code(r).await, (403, "cross_origin".into()));
+        // signed in and same origin: reaches validation
         let r = c
             .post(&url)
-            .bearer_auth("t0k")
+            .header(header::COOKIE, &cookie)
             .json(&json!({ "name": "x" }))
             .send()
             .await
@@ -1490,17 +1971,22 @@ mod tests {
     async fn mcp_call(
         c: &reqwest::Client,
         url: &str,
+        bearer: Option<&str>,
         session: Option<&str>,
         body: Value,
-    ) -> (Option<String>, Value) {
+    ) -> (u16, Option<String>, Value) {
         let mut req = c
             .post(url)
             .header("accept", "application/json, text/event-stream")
             .json(&body);
+        if let Some(b) = bearer {
+            req = req.bearer_auth(b);
+        }
         if let Some(s) = session {
             req = req.header("mcp-session-id", s);
         }
         let resp = req.send().await.unwrap();
+        let status = resp.status().as_u16();
         let sid = resp
             .headers()
             .get("mcp-session-id")
@@ -1514,122 +2000,34 @@ mod tests {
             .find(|l| l.starts_with('{'))
             .map(str::to_string)
             .unwrap_or(text);
-        (sid, serde_json::from_str(&json).unwrap_or(Value::Null))
+        (
+            status,
+            sid,
+            serde_json::from_str(&json).unwrap_or(Value::Null),
+        )
     }
 
-    #[tokio::test]
-    async fn mcp_lists_shared_tools_without_workspace_tools() {
-        let mut cfg = crate::config::Config::default();
-        cfg.server.token_env = "TSM_TEST_API_TOKEN_UNSET".into();
-        let dir = tempfile::tempdir().unwrap();
-        cfg.storage.data_dir = dir.path().to_path_buf();
-        let cfg = std::sync::Arc::new(cfg);
-        let state = crate::state::AppState::new(cfg.clone(), crate::store::open_memory().await);
-        let sb = std::sync::Arc::new(
-            crate::sandbox::Sandbox::init(dir.path(), cfg.sandbox.clone()).unwrap(),
-        );
-        state.set_agent(crate::agent::AgentManager::init(&state, sb).await);
-        crate::collect::pipeline().access.record(
-            r#"203.0.113.9 - - [x] "GET /health HTTP/1.1" 200 2 "-" "-""#,
-            now_ms(),
-        );
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/mcp", l.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(l, router(state)).await.unwrap() });
-        let c = reqwest::Client::new();
-
-        let (sid, init) = mcp_call(&c, &url, None, json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "0" } } })).await;
-        assert!(init["result"].is_object(), "{init}");
-        let sid = sid.expect("session id");
+    async fn mcp_tools(c: &reqwest::Client, url: &str, bearer: Option<&str>) -> (u16, Vec<String>) {
+        let (status, sid, _) = mcp_call(c, url, bearer, None, json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } } })).await;
+        let Some(sid) = sid else {
+            return (status, vec![]);
+        };
         let _ = mcp_call(
-            &c,
-            &url,
+            c,
+            url,
+            bearer,
             Some(&sid),
             json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
         )
         .await;
-        let (_, list) = mcp_call(
-            &c,
-            &url,
+        let (_, _, v) = mcp_call(
+            c,
+            url,
+            bearer,
             Some(&sid),
             json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
         )
         .await;
-        let names: Vec<&str> = list["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
-        for n in [
-            "get_health_snapshot",
-            "list_alerts",
-            "get_latest_report",
-            "get_report",
-            "list_findings",
-        ]
-        .iter()
-        .chain(crate::agent::tools::MCP_SHARED)
-        {
-            assert!(names.contains(n), "{n} missing from {names:?}");
-        }
-        for n in ["run_python", "write_script", "export_log_sample"] {
-            assert!(!names.contains(&n), "{n} must not be exposed");
-        }
-        let (_, call) = mcp_call(&c, &url, Some(&sid), json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "get_access_stats", "arguments": { "window_mins": 5 } } })).await;
-        let text = call["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(text.contains("203.0.113.x"), "{call}");
-        assert!(!text.contains("203.0.113.9"));
-    }
-
-    async fn mcp_tools(c: &reqwest::Client, url: &str, ops: Option<&str>) -> (u16, Vec<String>) {
-        let mut req = c
-            .post(url)
-            .header("accept", "application/json, text/event-stream")
-            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } } }));
-        if let Some(t) = ops {
-            req = req.header("x-tsm-ops-token", t);
-        }
-        let r = req.send().await.unwrap();
-        let status = r.status().as_u16();
-        let Some(sid) = r
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-        else {
-            return (status, vec![]);
-        };
-        let send = |body: Value| {
-            let mut q = c
-                .post(url)
-                .header("accept", "application/json, text/event-stream")
-                .header("mcp-session-id", &sid)
-                .json(&body);
-            if let Some(t) = ops {
-                q = q.header("x-tsm-ops-token", t);
-            }
-            q.send()
-        };
-        let _ = send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
-            .await
-            .unwrap();
-        let text = send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        let body = text
-            .lines()
-            .filter_map(|l| l.strip_prefix("data:"))
-            .map(str::trim)
-            .find(|l| l.starts_with('{'))
-            .map(str::to_string)
-            .unwrap_or(text);
-        let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
         let names = v["result"]["tools"]
             .as_array()
             .map(|a| {
@@ -1641,47 +2039,79 @@ mod tests {
         (status, names)
     }
 
+    async fn token(a: &App, cookie: &str, name: &str, scope: &str) -> String {
+        let r = reqwest::Client::new()
+            .post(format!("{}/api/v1/auth/tokens", a.base))
+            .header(header::COOKIE, cookie)
+            .json(&json!({ "name": name, "scope": scope }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        r.json::<Value>().await.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn sudo(a: &App, cookie: &str) {
+        let r = reqwest::Client::new()
+            .post(format!("{}/api/v1/auth/sudo", a.base))
+            .header(header::COOKIE, cookie)
+            .json(&json!({ "password": PW }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+
     #[tokio::test]
-    async fn ops_routes_and_mcp_ops_need_the_ops_token() {
-        // SAFETY: unique variable names for this test.
-        unsafe { std::env::set_var("TSM_TEST_OPS_TOKEN_A", "ops-token-0123456789") };
-        let mut cfg = crate::config::Config::default();
-        cfg.server.token_env = "TSM_TEST_API_TOKEN_UNSET".into();
-        cfg.server.ops_token_env = "TSM_TEST_OPS_TOKEN_A".into();
-        cfg.ops.helper_socket = "/nonexistent/helper.sock".into();
-        let state = crate::state::AppState::new(
-            std::sync::Arc::new(cfg),
-            crate::store::open_memory().await,
-        );
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", l.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(l, router(state)).await.unwrap() });
+    async fn sudo_api_tokens_and_mcp_scopes() {
+        let a = app(|cfg| cfg.ops.helper_socket = "/nonexistent/helper.sock".into()).await;
+        let cookie = admin(&a).await;
         let c = reqwest::Client::new();
-        let run = |tok: Option<&'static str>, body: Value| {
-            let mut r = c.post(format!("{base}/api/v1/ops/run")).json(&body);
-            if let Some(t) = tok {
-                r = r.header("x-tsm-ops-token", t);
-            }
-            r.send()
+        let run = |auth: (&str, String)| {
+            c.post(format!("{}/api/v1/ops/run", a.base))
+                .header(auth.0, auth.1)
+                .json(&json!({ "call": "docker.container", "args": { "id": "web", "action": "restart" } }))
+                .send()
         };
-        let body =
-            json!({ "call": "docker.container", "args": { "id": "web", "action": "restart" } });
-        assert_eq!(run(None, body.clone()).await.unwrap().status(), 403);
+        // server changes and token creation need a fresh password confirmation
         assert_eq!(
-            run(Some("wrong-token-xxxxxxxx"), body.clone())
-                .await
-                .unwrap()
-                .status(),
-            403
+            code(
+                run((header::COOKIE.as_str(), cookie.clone()))
+                    .await
+                    .unwrap()
+            )
+            .await,
+            (403, "sudo_required".into())
         );
-        // valid token but no helper: refused with the reason, and audited
-        let r = run(Some("ops-token-0123456789"), body.clone())
+        let r = c
+            .post(format!("{}/api/v1/auth/tokens", a.base))
+            .header(header::COOKIE, &cookie)
+            .json(&json!({ "name": "x", "scope": "read" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(code(r).await, (403, "sudo_required".into()));
+        let r = c
+            .post(format!("{}/api/v1/auth/sudo", a.base))
+            .header(header::COOKIE, &cookie)
+            .json(&json!({ "password": "not the password" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        sudo(&a, &cookie).await;
+        // now allowed: refused only because no helper runs (and audited with the account name)
+        let r = run((header::COOKIE.as_str(), cookie.clone()))
             .await
             .unwrap();
         assert_eq!(r.status(), 403);
         assert!(r.text().await.unwrap().contains("运维助手"));
         let audit: Value = c
-            .get(format!("{base}/api/v1/ops/audit"))
+            .get(format!("{}/api/v1/ops/audit", a.base))
+            .header(header::COOKIE, &cookie)
             .send()
             .await
             .unwrap()
@@ -1689,28 +2119,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(audit[0]["outcome"], "refused");
-        // reads are not writes
-        let r = run(
-            Some("ops-token-0123456789"),
-            json!({ "call": "docker.images" }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(r.status(), 400);
-        let caps: Value = c
-            .get(format!("{base}/api/v1/ops/capabilities"))
+        assert_eq!(audit[0]["actor"], "admin");
+
+        let read = token(&a, &cookie, "dashboard-reader", "read").await;
+        let ops = token(&a, &cookie, "agent", "ops").await;
+        let bearer = |t: &str| (header::AUTHORIZATION.as_str(), format!("Bearer {t}"));
+        assert_eq!(
+            c.get(format!("{}/api/v1/status", a.base))
+                .bearer_auth(&read)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            code(run(bearer(&read)).await.unwrap()).await,
+            (403, "scope_required".into())
+        );
+        // tokens cannot change settings or manage accounts
+        let r = c
+            .post(format!("{}/api/v1/settings/providers", a.base))
+            .bearer_auth(&ops)
+            .json(&json!({}))
             .send()
             .await
-            .unwrap()
-            .json()
+            .unwrap();
+        assert_eq!(r.status(), 403);
+        let r = c
+            .get(format!("{}/api/v1/auth/tokens", a.base))
+            .bearer_auth(&ops)
+            .send()
             .await
             .unwrap();
-        assert_eq!(caps["available"], false);
-        assert_eq!(caps["write_ready"], false);
+        assert_eq!(code(r).await, (403, "user_required".into()));
+        assert_eq!(run(bearer(&ops)).await.unwrap().status(), 403); // no helper, but past the gate
 
-        // MCP: write tools never appear on /mcp, only on /mcp/ops behind the token
-        let (_, read) = mcp_tools(&c, &format!("{base}/mcp"), None).await;
-        assert!(read.contains(&"firewall_status".to_string()), "{read:?}");
+        // MCP: nothing without a token, writes only for ops tokens on /mcp/ops
+        let (status, none) = mcp_tools(&c, &format!("{}/mcp", a.base), None).await;
+        assert_eq!((status, none.len()), (401, 0));
+        let (_, read_tools) = mcp_tools(&c, &format!("{}/mcp", a.base), Some(&read)).await;
+        assert!(
+            read_tools.contains(&"firewall_status".to_string()),
+            "{read_tools:?}"
+        );
         for w in [
             "docker_container_action",
             "nginx_write_file",
@@ -1718,31 +2170,144 @@ mod tests {
             "ssh_set_options",
             "revert_change",
         ] {
-            assert!(!read.contains(&w.to_string()), "{w} exposed on /mcp");
+            assert!(!read_tools.contains(&w.to_string()), "{w} exposed on /mcp");
         }
-        assert!(!read.iter().any(|n| n == "confirm_change"));
-        let (status, none) = mcp_tools(&c, &format!("{base}/mcp/ops"), None).await;
+        let (status, _) = mcp_tools(&c, &format!("{}/mcp/ops", a.base), Some(&read)).await;
         assert_eq!(status, 403);
-        assert!(none.is_empty());
-        let (_, ops) =
-            mcp_tools(&c, &format!("{base}/mcp/ops"), Some("ops-token-0123456789")).await;
-        assert!(ops.contains(&"nginx_write_file".to_string()), "{ops:?}");
-        assert!(ops.contains(&"firewall_status".to_string()));
-        assert!(!ops.iter().any(|n| n.contains("confirm")));
-    }
+        let (_, ops_tools) = mcp_tools(&c, &format!("{}/mcp/ops", a.base), Some(&ops)).await;
+        assert!(
+            ops_tools.contains(&"nginx_write_file".to_string()),
+            "{ops_tools:?}"
+        );
+        assert!(!ops_tools.iter().any(|n| n.contains("confirm")));
 
-    #[tokio::test]
-    async fn mcp_requires_api_token_when_configured() {
-        unsafe { std::env::set_var("TSM_TEST_API_TOKEN_MCP", "api-token-x") };
-        let base = serve("TSM_TEST_API_TOKEN_MCP").await;
-        let r = reqwest::Client::new()
-            .post(format!("{base}/mcp"))
-            .header("accept", "application/json, text/event-stream")
-            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
+        // revoked tokens stop working
+        let list: Value = c
+            .get(format!("{}/api/v1/auth/tokens", a.base))
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "dashboard-reader")
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let r = c
+            .delete(format!("{}/api/v1/auth/tokens/{id}", a.base))
+            .header(header::COOKIE, &cookie)
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status(), 401);
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            c.get(format!("{}/api/v1/status", a.base))
+                .bearer_auth(&read)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+    }
+
+    #[tokio::test]
+    async fn deprecated_env_tokens_still_work() {
+        // SAFETY: unique variable names for this test.
+        unsafe { std::env::set_var("TSM_TEST_API_TOKEN_LEGACY", "legacy-api-token") };
+        unsafe { std::env::set_var("TSM_TEST_OPS_TOKEN_LEGACY", "legacy-ops-token-0123") };
+        let a = app(|cfg| {
+            cfg.server.token_env = "TSM_TEST_API_TOKEN_LEGACY".into();
+            cfg.server.ops_token_env = "TSM_TEST_OPS_TOKEN_LEGACY".into();
+        })
+        .await;
+        let c = reqwest::Client::new();
+        assert_eq!(
+            c.get(format!("{}/api/v1/status", a.base))
+                .bearer_auth("legacy-api-token")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        let r = c
+            .post(format!("{}/api/v1/settings/providers", a.base))
+            .bearer_auth("legacy-api-token")
+            .json(&json!({ "name": "x" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        let (_, tools) = mcp_tools(&c, &format!("{}/mcp", a.base), Some("legacy-api-token")).await;
+        assert!(!tools.is_empty());
+        assert_eq!(
+            c.get(format!("{}/api/v1/status", a.base))
+                .bearer_auth("wrong")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_lists_shared_tools_without_workspace_tools() {
+        let a = app(|_| {}).await;
+        let dir = tempfile::tempdir().unwrap();
+        let sb = std::sync::Arc::new(
+            crate::sandbox::Sandbox::init(dir.path(), a.state.cfg.sandbox.clone()).unwrap(),
+        );
+        a.state
+            .set_agent(crate::agent::AgentManager::init(&a.state, sb).await);
+        let cookie = admin(&a).await;
+        sudo(&a, &cookie).await;
+        let read = token(&a, &cookie, "reader", "read").await;
+        crate::collect::pipeline().access.record(
+            r#"203.0.113.9 - - [x] "GET /health HTTP/1.1" 200 2 "-" "-""#,
+            now_ms(),
+        );
+        let c = reqwest::Client::new();
+        let url = format!("{}/mcp", a.base);
+        let (_, names) = mcp_tools(&c, &url, Some(&read)).await;
+        for n in [
+            "get_health_snapshot",
+            "list_alerts",
+            "get_latest_report",
+            "get_report",
+            "list_findings",
+        ]
+        .iter()
+        .chain(crate::agent::tools::MCP_SHARED)
+        {
+            assert!(names.iter().any(|x| x == n), "{n} missing from {names:?}");
+        }
+        for n in ["run_python", "write_script", "export_log_sample"] {
+            assert!(!names.iter().any(|x| x == n), "{n} must not be exposed");
+        }
+        let (_, sid, _) = mcp_call(&c, &url, Some(&read), None, json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } } })).await;
+        let sid = sid.unwrap();
+        let _ = mcp_call(
+            &c,
+            &url,
+            Some(&read),
+            Some(&sid),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        )
+        .await;
+        let (_, _, call) = mcp_call(&c, &url, Some(&read), Some(&sid), json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "get_access_stats", "arguments": { "window_mins": 5 } } })).await;
+        let text = call["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("203.0.113.x"), "{call}");
+        assert!(!text.contains("203.0.113.9"));
     }
 
     #[tokio::test]
@@ -1772,25 +2337,21 @@ mod tests {
         ];
         let (socket, _hdir) = crate::helper::tests::spawn_helper(hcfg).await;
 
-        unsafe { std::env::set_var("TSM_TEST_OPS_TOKEN_E2E", "ops-token-e2e-0123456") };
-        let mut cfg = crate::config::Config::default();
-        cfg.server.token_env = "TSM_TEST_API_TOKEN_UNSET".into();
-        cfg.server.ops_token_env = "TSM_TEST_OPS_TOKEN_E2E".into();
-        cfg.ops.helper_socket = socket;
-        cfg.ops.secret_env = "TSM_TEST_HELPER_SECRET".into();
-        cfg.ops.allow_without_sandbox = true;
-        let state = crate::state::AppState::new(
-            std::sync::Arc::new(cfg),
-            crate::store::open_memory().await,
-        );
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", l.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(l, router(state)).await.unwrap() });
+        let a = app(move |cfg| {
+            cfg.ops.helper_socket = socket;
+            cfg.ops.secret_env = "TSM_TEST_HELPER_SECRET".into();
+            cfg.ops.allow_without_sandbox = true;
+        })
+        .await;
+        let cookie = admin(&a).await;
         let c = reqwest::Client::new();
+        let get = |path: &str| {
+            c.get(format!("{}{path}", a.base))
+                .header(header::COOKIE, &cookie)
+                .send()
+        };
 
-        let caps: Value = c
-            .get(format!("{base}/api/v1/ops/capabilities"))
-            .send()
+        let caps: Value = get("/api/v1/ops/capabilities")
             .await
             .unwrap()
             .json()
@@ -1798,9 +2359,7 @@ mod tests {
             .unwrap();
         assert_eq!(caps["available"], true, "{caps}");
         assert_eq!(caps["write_ready"], true, "{caps}");
-        let sites: Value = c
-            .get(format!("{base}/api/v1/ops/read/nginx.sites"))
-            .send()
+        let sites: Value = get("/api/v1/ops/read/nginx.sites")
             .await
             .unwrap()
             .json()
@@ -1809,39 +2368,35 @@ mod tests {
         assert_eq!(sites["source"], "helper");
         assert_eq!(sites["data"]["sites"][0]["enabled"], true);
 
-        let job: Value = c
-            .post(format!("{base}/api/v1/ops/run"))
-            .header("x-tsm-ops-token", "ops-token-e2e-0123456")
-            .json(&json!({ "call": "nginx.site", "args": { "name": "app", "enabled": false } }))
-            .send()
+        sudo(&a, &cookie).await;
+        let run = |body: Value| {
+            c.post(format!("{}/api/v1/ops/run", a.base))
+                .header(header::COOKIE, &cookie)
+                .json(&body)
+                .send()
+        };
+        let job: Value =
+            run(json!({ "call": "nginx.site", "args": { "name": "app", "enabled": false } }))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(job["status"], "succeeded", "{job}");
+        assert_eq!(job["actor"], "admin");
+        assert!(root.join("conf.d/app.conf.disabled").exists());
+
+        // an operation the helper does not allow
+        let job: Value = run(json!({ "call": "nginx.reload" }))
             .await
             .unwrap()
             .json()
             .await
             .unwrap();
-        assert_eq!(job["status"], "succeeded", "{job}");
-        assert!(
-            job["log"].as_str().unwrap().contains("nginx -t")
-                || job["log"].as_str().unwrap().contains("fake-nginx"),
-            "{job}"
-        );
-        assert!(root.join("conf.d/app.conf.disabled").exists());
-
-        // an operation the helper does not allow
-        let r = c
-            .post(format!("{base}/api/v1/ops/run"))
-            .header("x-tsm-ops-token", "ops-token-e2e-0123456")
-            .json(&json!({ "call": "nginx.reload" }))
-            .send()
-            .await
-            .unwrap();
-        let job: Value = r.json().await.unwrap();
         assert_eq!(job["status"], "failed");
         assert!(job["error"].as_str().unwrap().contains("未允许"), "{job}");
 
-        let audit: Value = c
-            .get(format!("{base}/api/v1/ops/audit"))
-            .send()
+        let audit: Value = get("/api/v1/ops/audit")
             .await
             .unwrap()
             .json()
@@ -1855,5 +2410,6 @@ mod tests {
             .collect();
         assert_eq!(outcomes, ["failed", "succeeded"]);
         assert_eq!(audit[1]["via"], "web");
+        assert_eq!(audit[1]["actor"], "admin");
     }
 }

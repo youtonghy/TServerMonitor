@@ -25,6 +25,29 @@ pub struct Config {
     pub packages: PackagesConfig,
     pub ops: OpsConfig,
     pub journal: JournalConfig,
+    pub auth: AuthConfig,
+}
+
+/// Dashboard sign-in (see `crate::auth`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Sessions last this long and are renewed while in use.
+    pub session_days: i64,
+    /// A session unused for this long ends.
+    pub idle_hours: i64,
+    /// "auto" (Secure when a proxy on this host reports https), "always" or "never".
+    pub secure_cookie: String,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            session_days: 7,
+            idle_hours: 12,
+            secure_cookie: "auto".into(),
+        }
+    }
 }
 
 /// systemd journal as a log source (see `collect::journal`).
@@ -97,10 +120,11 @@ impl Default for PackagesConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
-    /// Name of the env var holding the API bearer token.
+    /// DEPRECATED: env var with a static bearer token that still works next to the accounts
+    /// and API tokens (read access plus settings changes). Use API tokens from the dashboard.
     pub token_env: String,
-    /// Name of the env var holding the separate ops token. Changes to nginx, the firewall, SSH
-    /// and Docker (web and MCP) require it in the `X-TSM-Ops-Token` header, never in a URL.
+    /// DEPRECATED: env var with a static ops token (`X-TSM-Ops-Token` or bearer) that may
+    /// change the server through the ops helper. Use an `ops` API token instead.
     pub ops_token_env: String,
     /// Extra `Host` values accepted by the MCP endpoint (loopback is always accepted), e.g.
     /// `["monitor.example.com"]` when an agent connects through a reverse proxy.
@@ -525,16 +549,16 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !self.server.bind.ip().is_loopback()
-            && std::env::var(&self.server.token_env)
-                .unwrap_or_default()
-                .is_empty()
+        if !(1..=365).contains(&self.auth.session_days)
+            || !(1..=720).contains(&self.auth.idle_hours)
         {
-            bail!(
-                "server.bind is {} (not loopback) but {} is not set; refusing to expose the dashboard without a token",
-                self.server.bind,
-                self.server.token_env
-            );
+            bail!("auth.session_days must be 1..=365 and auth.idle_hours 1..=720");
+        }
+        if !matches!(
+            self.auth.secure_cookie.as_str(),
+            "auto" | "always" | "never"
+        ) {
+            bail!("auth.secure_cookie must be auto, always or never");
         }
         if let Some(ops) = secret(&self.server.ops_token_env) {
             if ops.len() < 16 {

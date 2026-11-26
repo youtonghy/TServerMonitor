@@ -48,6 +48,7 @@ pub struct AppState {
     pub notifier: Notifier,
     pub settings: Settings,
     pub ops: crate::ops::Runtime,
+    pub auth: crate::auth::Runtime,
     agent: OnceLock<Arc<AgentManager>>,
 }
 
@@ -67,6 +68,7 @@ impl AppState {
             notifier,
             settings,
             ops: crate::ops::Runtime::default(),
+            auth: crate::auth::Runtime::default(),
             agent: OnceLock::new(),
         })
     }

@@ -39,6 +39,8 @@ pub struct Via {
     /// web | mcp
     pub via: &'static str,
     pub remote: Option<String>,
+    /// account name, `token:<name>` or `legacy-token`
+    pub actor: String,
 }
 
 #[derive(Default)]
@@ -77,7 +79,6 @@ pub struct Capabilities {
     pub write_ready: bool,
     pub write_reason: Option<String>,
     pub domains: Value,
-    pub ops_token_env: String,
 }
 
 async fn hello(state: &Shared) -> Result<Value, String> {
@@ -121,7 +122,6 @@ pub fn invalidate_caps(state: &Shared) {
 
 pub async fn capabilities(state: &Shared) -> Capabilities {
     let h = hello_cached(state).await;
-    let ops_token = crate::config::secret(&state.cfg.server.ops_token_env).is_some();
     let isolated =
         state.ops.isolation_ok.load(Ordering::Relaxed) || state.cfg.ops.allow_without_sandbox;
     let (available, reason, hv) = match h {
@@ -130,11 +130,6 @@ pub async fn capabilities(state: &Shared) -> Capabilities {
     };
     let write_reason = if !available {
         reason.clone()
-    } else if !ops_token {
-        Some(format!(
-            "未设置运维令牌（环境变量 {}），只能查看",
-            state.cfg.server.ops_token_env
-        ))
     } else if !isolated {
         Some("分析脚本沙箱没有内核级隔离，已禁止通过助手修改服务器（可在 [ops] allow_without_sandbox 中放开）".into())
     } else {
@@ -153,7 +148,6 @@ pub async fn capabilities(state: &Shared) -> Capabilities {
         } else {
             json!({})
         },
-        ops_token_env: state.cfg.server.ops_token_env.clone(),
     }
 }
 
@@ -301,6 +295,7 @@ pub struct Job {
     pub dry_run: bool,
     pub via: String,
     pub remote: Option<String>,
+    pub actor: Option<String>,
     pub status: String,
     pub error: Option<String>,
     pub result: Option<Value>,
@@ -320,6 +315,7 @@ struct JobRow {
     dry_run: bool,
     via: String,
     remote: Option<String>,
+    actor: Option<String>,
     status: String,
     error: Option<String>,
     result: Option<String>,
@@ -339,6 +335,7 @@ impl From<JobRow> for Job {
             dry_run: r.dry_run,
             via: r.via,
             remote: r.remote,
+            actor: r.actor,
             status: r.status,
             error: r.error,
             result: r.result.and_then(|s| serde_json::from_str(&s).ok()),
@@ -363,7 +360,7 @@ pub async fn list_jobs(
     limit: i64,
 ) -> Result<Vec<Job>> {
     Ok(sqlx::query_as::<_, JobRow>(
-        "SELECT id, domain, call, summary, args, dry_run, via, remote, status, error, result, NULL AS log, started_at, finished_at
+        "SELECT id, domain, call, summary, args, dry_run, via, remote, actor, status, error, result, NULL AS log, started_at, finished_at
          FROM ops_jobs WHERE (?1 IS NULL OR domain = ?1) ORDER BY id DESC LIMIT ?2",
     )
         .bind(domain)
@@ -377,7 +374,7 @@ pub async fn list_jobs(
 
 pub async fn get_job(db: &crate::store::Db, id: i64) -> Result<Option<Job>> {
     Ok(sqlx::query_as::<_, JobRow>(
-        "SELECT id, domain, call, summary, args, dry_run, via, remote, status, error, result, log, started_at, finished_at
+        "SELECT id, domain, call, summary, args, dry_run, via, remote, actor, status, error, result, log, started_at, finished_at
          FROM ops_jobs WHERE id = ?",
     )
         .bind(id)
@@ -392,6 +389,7 @@ pub struct AuditEntry {
     pub ts: i64,
     pub via: String,
     pub remote: Option<String>,
+    pub actor: Option<String>,
     pub call: String,
     pub summary: String,
     pub dry_run: bool,
@@ -402,7 +400,7 @@ pub struct AuditEntry {
 
 pub async fn list_audit(db: &crate::store::Db, limit: i64) -> Result<Vec<AuditEntry>> {
     Ok(sqlx::query_as::<_, AuditEntry>(
-        "SELECT id, ts, via, remote, call, summary, dry_run, outcome, detail, job_id FROM audit_log ORDER BY id DESC LIMIT ?",
+        "SELECT id, ts, via, remote, actor, call, summary, dry_run, outcome, detail, job_id FROM audit_log ORDER BY id DESC LIMIT ?",
     )
     .bind(limit.clamp(1, 500))
     .fetch_all(db)
@@ -446,11 +444,12 @@ async fn audit(
     job: Option<i64>,
 ) -> Option<i64> {
     sqlx::query_scalar(
-        "INSERT INTO audit_log (ts, via, remote, call, summary, dry_run, outcome, detail, job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO audit_log (ts, via, remote, actor, call, summary, dry_run, outcome, detail, job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(now_ms())
     .bind(s.via.via)
     .bind(&s.via.remote)
+    .bind(&s.via.actor)
     .bind(&s.call)
     .bind(&s.summary)
     .bind(s.dry_run)
@@ -483,7 +482,7 @@ pub async fn submit(state: &Shared, s: Submit) -> Result<i64> {
     }
     let secret = secret(state).ok_or_else(|| OpError::not_allowed("未配置运维助手密钥"))?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO ops_jobs (domain, call, summary, args, dry_run, via, remote, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?) RETURNING id",
+        "INSERT INTO ops_jobs (domain, call, summary, args, dry_run, via, remote, actor, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?) RETURNING id",
     )
     .bind(&domain)
     .bind(&s.call)
@@ -492,6 +491,7 @@ pub async fn submit(state: &Shared, s: Submit) -> Result<i64> {
     .bind(s.dry_run)
     .bind(s.via.via)
     .bind(&s.via.remote)
+    .bind(&s.via.actor)
     .bind(now_ms())
     .fetch_one(&state.db)
     .await?;

@@ -4,14 +4,22 @@
 # environment variables whose names are configured below.
 
 [server]
-# Keep the dashboard on loopback. Binding to another address requires TSM_API_TOKEN.
+# The dashboard, REST API and MCP need a login: on first start, open the dashboard and create
+# the administrator with the setup code from <data_dir>/setup-code (or the log). Machines (MCP
+# clients, scripts) use API tokens created under Settings > Account & security.
+# Prefer loopback plus a TLS reverse proxy when exposing it.
 bind = "127.0.0.1:8787"
+# DEPRECATED static tokens, still accepted when the env vars are set (remove them once your
+# clients use API tokens): TSM_API_TOKEN = read + settings, TSM_OPS_TOKEN = server changes.
 token_env = "TSM_API_TOKEN"
-# Separate token for management (nginx, firewall, SSH, Docker) from the dashboard and from
-# MCP agents on /mcp/ops. Sent only in the X-TSM-Ops-Token header; must differ from TSM_API_TOKEN.
 ops_token_env = "TSM_OPS_TOKEN"
 # Extra Host names the MCP endpoint accepts (loopback always works), e.g. behind a reverse proxy.
 mcp_allowed_hosts = []
+
+[auth]
+session_days = 7          # sessions are renewed while in use
+idle_hours = 12           # unused this long = signed out
+secure_cookie = "auto"    # auto: Secure when a proxy on this host sends X-Forwarded-Proto: https
 
 [storage]
 data_dir = "/var/lib/tsmonitor"

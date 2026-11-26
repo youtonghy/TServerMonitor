@@ -46,6 +46,7 @@ base64 = "0.23.1"
 url = "2.5.8"
 lettre = { version = "0.11.24", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls", "aws-lc-rs", "rustls-platform-verifier"] }
 similar = "2"
+argon2 = { version = "0.6", features = ["getrandom"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"

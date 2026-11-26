@@ -3,8 +3,9 @@
 //! * `/mcp` is read-only: diagnostics, plus the inventory of nginx, firewall, SSH and Docker
 //!   (secrets redacted). The analysis tools listed in `agent::tools::MCP_SHARED` run the same
 //!   implementation the built-in agent uses; workspace/script tools are never exposed.
-//! * `/mcp/ops` additionally registers the write tools. It sits behind the ops token
-//!   (`X-TSM-Ops-Token`), every write is a dry run unless `dry_run: false` is passed, and
+//! * Both need an API token (`Authorization: Bearer tsm_...`) created in the dashboard.
+//! * `/mcp/ops` additionally registers the write tools and needs a token with the `ops`
+//!   scope; every write is a dry run unless `dry_run: false` is passed, and
 //!   everything goes through the root helper, which applies its own allow-list. Agents can
 //!   revert pending firewall/SSH changes but never confirm them.
 
@@ -629,11 +630,14 @@ impl McpServer {
         args: serde_json::Value,
         dry_run: bool,
     ) -> Result<CallToolResult, ErrorData> {
-        let remote = ext
-            .get::<axum::http::request::Parts>()
-            .and_then(|p| p.headers.get("x-forwarded-for"))
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.split(',').next().unwrap_or(v).trim().to_string());
+        let parts = ext.get::<axum::http::request::Parts>();
+        let remote = parts
+            .and_then(|p| p.extensions.get::<crate::api::RemoteAddr>())
+            .and_then(|r| r.0.clone());
+        let actor = parts
+            .and_then(|p| p.extensions.get::<crate::auth::Principal>())
+            .map(|p| p.actor())
+            .unwrap_or_else(|| "unknown".into());
         let summary = crate::ops::calls::summary(call, &args);
         let id = crate::ops::submit(
             &self.state,
@@ -642,7 +646,11 @@ impl McpServer {
                 args,
                 dry_run,
                 summary,
-                via: crate::ops::Via { via: "mcp", remote },
+                via: crate::ops::Via {
+                    via: "mcp",
+                    remote,
+                    actor,
+                },
             },
         )
         .await

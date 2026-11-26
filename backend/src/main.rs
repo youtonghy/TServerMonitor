@@ -36,6 +36,12 @@ enum Cmd {
         #[arg(long, default_value = "/etc/tsmonitor/updater.toml")]
         updater_config: PathBuf,
     },
+    /// Set a new random password for a dashboard account and end its sessions
+    ResetPassword {
+        /// Account name
+        #[arg(long)]
+        user: String,
+    },
     /// Run the optional ops helper for nginx, firewall, SSH and Docker (as root)
     Helper {
         /// Root-owned helper config (never the daemon's config.toml)
@@ -79,6 +85,21 @@ fn main() -> Result<()> {
         println!("config ok: {}", cli.config.display());
         return Ok(());
     }
+    if let Some(Cmd::ResetPassword { user }) = &cli.cmd {
+        let data_dir = cfg.storage.data_dir.clone();
+        let user = user.clone();
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async move {
+                let db = store::open(&data_dir).await?;
+                let pw = tsmonitor::auth::reset_password(&db, &user).await?;
+                println!(
+                    "New password for {user}: {pw}\nAll sessions of this account were signed out."
+                );
+                anyhow::Ok(())
+            });
+    }
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -96,6 +117,19 @@ async fn run(cfg: config::Config) -> Result<()> {
         tsmonitor::ops::protect_secret();
     }
     let state = state::AppState::new(cfg.clone(), db);
+    if let Some(code) = tsmonitor::auth::init(&state).await? {
+        tsmonitor::auth::announce_setup(&state, &code);
+    }
+    for (env, what) in [
+        (&cfg.server.token_env, "API"),
+        (&cfg.server.ops_token_env, "ops"),
+    ] {
+        if config::secret(env).is_some() {
+            tracing::warn!(
+                "{env} is set: the static {what} token still works but is deprecated; create API tokens in the dashboard instead"
+            );
+        }
+    }
 
     let sandbox = Arc::new(sandbox::Sandbox::init(
         &cfg.storage.data_dir,
