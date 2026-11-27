@@ -370,11 +370,23 @@ pub struct NewFinding<'a> {
     pub evidence: &'a str,
 }
 
-/// Inserts or refreshes a finding. Returns true when it is new (or re-opened).
+/// critical > high > medium > low > info (unknown values rank lowest).
+fn finding_rank(severity: &str) -> u8 {
+    match severity {
+        "critical" => 4,
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+/// Inserts or refreshes a finding. Returns true when it is worth alerting on: new, re-opened,
+/// or raised to a higher severity than the stored one.
 pub async fn upsert_finding(db: &Db, f: &NewFinding<'_>) -> Result<bool> {
     let now = now_ms();
-    let existing: Option<(i64, bool)> =
-        sqlx::query_as("SELECT id, resolved FROM findings WHERE key = ?")
+    let existing: Option<(bool, String)> =
+        sqlx::query_as("SELECT resolved, severity FROM findings WHERE key = ?")
             .bind(f.key)
             .fetch_optional(db)
             .await?;
@@ -393,7 +405,10 @@ pub async fn upsert_finding(db: &Db, f: &NewFinding<'_>) -> Result<bool> {
     .bind(now)
     .execute(db)
     .await?;
-    Ok(!matches!(existing, Some((_, false))))
+    Ok(match existing {
+        None | Some((true, _)) => true,
+        Some((false, old)) => finding_rank(f.severity) > finding_rank(&old),
+    })
 }
 
 /// Marks findings of a category resolved unless their key is in `keep`.
@@ -826,5 +841,24 @@ mod tests {
         resolve_findings_except(&db, "port", &[]).await.unwrap();
         assert!(list_findings(&db, false).await.unwrap().is_empty());
         assert!(upsert_finding(&db, &f).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn finding_escalation_counts_as_new() {
+        let db = open_memory().await;
+        let mut f = NewFinding {
+            key: "login:bruteforce:10.0.0.1",
+            category: "login",
+            severity: "medium",
+            title: "t",
+            detail: "d",
+            evidence: "e",
+        };
+        assert!(upsert_finding(&db, &f).await.unwrap());
+        f.severity = "high";
+        assert!(upsert_finding(&db, &f).await.unwrap());
+        assert!(!upsert_finding(&db, &f).await.unwrap());
+        f.severity = "medium";
+        assert!(!upsert_finding(&db, &f).await.unwrap());
     }
 }
