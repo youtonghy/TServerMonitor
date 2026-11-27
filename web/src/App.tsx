@@ -9,6 +9,7 @@ import LoginPage from '@/pages/login'
 import SetupPage from '@/pages/setup'
 import { AppShell } from '@/components/app-shell'
 import { NotFound } from '@/pages/not-found'
+import { PageErrorBoundary } from '@/components/page-error-boundary'
 import { useRoute } from '@/lib/router'
 
 const pages: Record<string, ComponentType> = {
@@ -33,11 +34,14 @@ const Wall = lazy(() => import('@/pages/wall'))
 
 function Router() {
   const route = useRoute()
-  const Page = pages[route.segments[0] ?? ''] ?? NotFound
+  const segment = route.segments[0] ?? ''
+  const Page = pages[segment] ?? NotFound
   return (
-    <Suspense fallback={<Skeleton lines={8} label="正在加载页面" />}>
-      <Page />
-    </Suspense>
+    <PageErrorBoundary key={segment}>
+      <Suspense fallback={<Skeleton lines={8} label="正在加载页面" />}>
+        <Page />
+      </Suspense>
+    </PageErrorBoundary>
   )
 }
 
@@ -86,9 +90,11 @@ function Dashboard() {
   if (route.segments[0] === 'wall') {
     return (
       <LiveProvider>
-        <Suspense fallback={<Skeleton lines={8} label="正在加载大屏" />}>
-          <Wall />
-        </Suspense>
+        <PageErrorBoundary>
+          <Suspense fallback={<Skeleton lines={8} label="正在加载大屏" />}>
+            <Wall />
+          </Suspense>
+        </PageErrorBoundary>
       </LiveProvider>
     )
   }
