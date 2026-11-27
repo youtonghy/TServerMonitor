@@ -698,6 +698,17 @@ pub async fn list_conversations(
         .await?)
 }
 
+/// Conversations started about a report (or one of its items), oldest first.
+pub async fn report_conversations(db: &Db, report_id: i64) -> Result<Vec<Conversation>> {
+    let sql = format!(
+        "SELECT {CONV_COLS} FROM conversations c WHERE json_extract(c.context, '$.report_id') = ? ORDER BY c.created_at LIMIT 200"
+    );
+    Ok(sqlx::query_as::<_, Conversation>(sqlx::AssertSqlSafe(sql))
+        .bind(report_id)
+        .fetch_all(db)
+        .await?)
+}
+
 pub async fn get_conversation(db: &Db, id: &str) -> Result<Option<Conversation>> {
     let sql = format!("SELECT {CONV_COLS} FROM conversations c WHERE c.id = ?");
     Ok(sqlx::query_as::<_, Conversation>(sqlx::AssertSqlSafe(sql))

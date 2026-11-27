@@ -5,9 +5,11 @@
 //!   implementation the built-in agent uses; workspace/script tools are never exposed.
 //! * Both need an API token (`Authorization: Bearer tsm_...`) created in the dashboard.
 //! * `/mcp/ops` additionally registers the write tools and needs a token with the `ops`
-//!   scope; every write is a dry run unless `dry_run: false` is passed, and
-//!   everything goes through the root helper, which applies its own allow-list. Agents can
-//!   revert pending firewall/SSH changes but never confirm them.
+//!   scope; every write is a dry run unless `dry_run: false` is passed. A real change becomes
+//!   a change request (`approvals`) with the caller's reason, which a person approves in the
+//!   dashboard unless the operator set that action to run automatically. Host changes go
+//!   through the root helper, which applies its own allow-list. Agents can revert pending
+//!   firewall/SSH changes but never confirm them.
 
 use std::sync::Arc;
 
@@ -116,6 +118,8 @@ impl McpServer {
         let ctx = crate::agent::tools::ToolCtx {
             state: &self.state,
             sandbox: agent.sandbox(),
+            conversation: None,
+            run_id: None,
         };
         match crate::agent::tools::execute(&ctx, name, &input).await {
             Ok(v) => json_result(&v),
@@ -438,6 +442,317 @@ impl McpServer {
     async fn list_pending_changes(&self) -> Result<CallToolResult, ErrorData> {
         json_result(&crate::ops::pending(&self.state).await)
     }
+
+    // ------------------------------------------------------------ more diagnostics
+
+    #[tool(
+        description = "Recent stdout/stderr of one container (redacted).",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_container_logs(
+        &self,
+        Parameters(a): Parameters<ContainerLogsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.shared("get_container_logs", args(&a)).await
+    }
+
+    #[tool(
+        description = "Log sources (files and containers) with line and error counts and current rate.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_log_sources(&self) -> Result<CallToolResult, ErrorData> {
+        self.shared("list_log_sources", serde_json::json!({})).await
+    }
+
+    #[tool(
+        description = "Lines and errors per log source over time (bucketed).",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_log_rates(
+        &self,
+        Parameters(a): Parameters<LogRatesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.shared("get_log_rates", args(&a)).await
+    }
+
+    #[tool(
+        description = "Listening ports and whether they are exposed beyond loopback.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_ports(&self) -> Result<CallToolResult, ErrorData> {
+        self.shared("list_ports", serde_json::json!({})).await
+    }
+
+    #[tool(
+        description = "Read-only database metrics (connections, QPS/TPS, slow queries, buffer hit rate, lock waits).",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_db_metrics(&self) -> Result<CallToolResult, ErrorData> {
+        self.shared("get_db_metrics", serde_json::json!({})).await
+    }
+
+    #[tool(
+        description = "List diagnostic reports (summaries, newest first), optionally of one kind.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_reports(
+        &self,
+        Parameters(a): Parameters<ListReportsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let kind = match a.kind.as_deref().filter(|k| !k.is_empty()) {
+            None => None,
+            Some(k) => Some(
+                crate::model::ReportKind::parse(k)
+                    .ok_or_else(|| ErrorData::invalid_params("unknown report kind", None))?
+                    .as_str(),
+            ),
+        };
+        json_result(
+            &store::list_reports(&self.state.db, kind, a.limit.unwrap_or(20))
+                .await
+                .map_err(internal)?,
+        )
+    }
+
+    #[tool(
+        description = "Conversations of the built-in AI agent (kind: chat = started by people or agents, task = scheduled analyses), newest first.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_conversations(
+        &self,
+        Parameters(a): Parameters<ListConversationsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        json_result(
+            &store::list_conversations(&self.state.db, a.kind.as_deref(), a.limit.unwrap_or(20))
+                .await
+                .map_err(internal)?,
+        )
+    }
+
+    #[tool(
+        description = "One conversation of the built-in agent with every run, step (tool calls, results, messages) and its change requests. Use it to read the answer to agent.ask.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_conversation(
+        &self,
+        Parameters(a): Parameters<IdStrArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let conv = store::get_conversation(&self.state.db, &a.id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| ErrorData::invalid_params("conversation not found", None))?;
+        let runs: Vec<serde_json::Value> = store::conversation_runs(&self.state.db, &a.id)
+            .await
+            .map_err(internal)?
+            .into_iter()
+            .map(|(run, steps)| serde_json::json!({ "run": run, "steps": steps }))
+            .collect();
+        let requests =
+            crate::approvals::for_conversations(&self.state.db, std::slice::from_ref(&a.id))
+                .await
+                .map_err(internal)?;
+        json_result(
+            &serde_json::json!({ "conversation": conv, "runs": runs, "requests": requests }),
+        )
+    }
+
+    #[tool(
+        description = "Scheduled analysis tasks (trigger, prompt, last run) and the built-in system jobs.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_tasks(&self) -> Result<CallToolResult, ErrorData> {
+        json_result(&serde_json::json!({
+            "tasks": crate::tasks::list(&self.state.db).await.map_err(internal)?,
+            "system": crate::tasks::system_jobs(&self.state),
+        }))
+    }
+
+    #[tool(
+        description = "Prompt library used by scheduled tasks (built-in and custom).",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_prompts(&self) -> Result<CallToolResult, ErrorData> {
+        json_result(
+            &crate::agent::library::list(&self.state.db)
+                .await
+                .map_err(internal)?,
+        )
+    }
+
+    #[tool(
+        description = "Notification channels (Telegram, email, webhooks): kind, enabled, minimum severity, events. Secrets are never returned.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_notify_channels(&self) -> Result<CallToolResult, ErrorData> {
+        let list: Vec<crate::channels::ChannelView> = crate::channels::all(&self.state)
+            .await
+            .iter()
+            .map(Into::into)
+            .collect();
+        json_result(&list)
+    }
+
+    #[tool(
+        description = "Package update jobs (refresh / upgrade) with status, newest first.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_package_jobs(&self) -> Result<CallToolResult, ErrorData> {
+        json_result(
+            &crate::updater::list_jobs(&self.state.db)
+                .await
+                .map_err(internal)?,
+        )
+    }
+
+    #[tool(
+        description = "One package update job with its log.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_package_job(
+        &self,
+        Parameters(a): Parameters<ReportArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match crate::updater::get_job(&self.state.db, a.id)
+            .await
+            .map_err(internal)?
+        {
+            Some(j) => json_result(&j),
+            None => Err(ErrorData::invalid_params("job not found", None)),
+        }
+    }
+
+    #[tool(
+        description = "Audit log of every change request to the ops helper (who, from where, what, outcome), newest first.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_ops_audit(
+        &self,
+        Parameters(a): Parameters<LimitArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        json_result(
+            &crate::ops::list_audit(&self.state.db, a.limit.unwrap_or(50))
+                .await
+                .map_err(internal)?,
+        )
+    }
+
+    // ------------------------------------------------------------ change requests (read)
+
+    #[tool(
+        description = "Changes you can ask for with request_change (or the dedicated write tools on /mcp/ops): name, label, whether a person must approve it, and the argument format.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_change_actions(&self) -> Result<CallToolResult, ErrorData> {
+        json_result(
+            &crate::approvals::catalog_view(&self.state.db, false)
+                .await
+                .map_err(internal)?,
+        )
+    }
+
+    #[tool(
+        description = "Change requests (newest first): status open (default, waiting for approval), all, or one of pending|executed|failed|rejected|expired.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_change_requests(
+        &self,
+        Parameters(a): Parameters<ListRequestsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let status = match a.status.as_deref() {
+            None | Some("") | Some("open") => Some("open"),
+            Some("all") => None,
+            Some(s) => Some(s),
+        };
+        let list = crate::approvals::list(&self.state.db, status, a.limit.unwrap_or(20))
+            .await
+            .map_err(internal)?;
+        json_result(&list.iter().map(request_view).collect::<Vec<_>>())
+    }
+
+    #[tool(
+        description = "One change request. wait_secs (0-120) waits for it to be decided and run before answering.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_change_request(
+        &self,
+        Parameters(a): Parameters<GetRequestArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let wait = std::time::Duration::from_secs(a.wait_secs.unwrap_or(0).min(120));
+        match crate::approvals::wait(&self.state, a.id, wait)
+            .await
+            .map_err(internal)?
+        {
+            Some(r) => json_result(&request_view(&r)),
+            None => Err(ErrorData::invalid_params("change request not found", None)),
+        }
+    }
+}
+
+#[derive(Deserialize, serde::Serialize, JsonSchema)]
+pub struct ContainerLogsArgs {
+    /// container name or id
+    pub container: String,
+    /// max lines, 1..500, default 200
+    pub tail: Option<i64>,
+    /// only lines that look like warnings or errors
+    pub errors_only: Option<bool>,
+}
+
+#[derive(Deserialize, serde::Serialize, JsonSchema)]
+pub struct LogRatesArgs {
+    /// 1h | 6h | 24h | 7d | 30d
+    pub range: String,
+    pub source: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListReportsArgs {
+    /// hourly | daily | incident | audit | custom
+    pub kind: Option<String>,
+    /// default 20
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListConversationsArgs {
+    /// chat | task; omit for both
+    pub kind: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct IdStrArgs {
+    pub id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LimitArgs {
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListRequestsArgs {
+    /// open (default) | all | pending | executed | failed | rejected | expired
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetRequestArgs {
+    pub id: i64,
+    /// wait up to this many seconds (max 120) for a decision and the result
+    pub wait_secs: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RequestChangeArgs {
+    /// action name from list_change_actions, e.g. alert.ack, task.run, packages.job
+    pub action: String,
+    /// arguments of the action (see list_change_actions)
+    #[serde(default)]
+    pub args: serde_json::Value,
+    /// why: the problem, the evidence and the expected effect; shown to the approver
+    pub reason: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -466,6 +781,9 @@ pub struct ContainerActionArgs {
     /// default true: only report what would happen
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -475,6 +793,9 @@ pub struct ProjectActionArgs {
     pub action: String,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -483,6 +804,9 @@ pub struct ImagePullArgs {
     pub reference: String,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -493,6 +817,9 @@ pub struct ImageRemoveArgs {
     pub force: bool,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -501,6 +828,9 @@ pub struct PruneArgs {
     pub target: String,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -508,12 +838,18 @@ pub struct NameDryArgs {
     pub name: String,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct DryArgs {
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -522,6 +858,9 @@ pub struct SiteToggleArgs {
     pub enabled: bool,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -534,6 +873,9 @@ pub struct WriteFileArgs {
     pub base_sha256: Option<String>,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -548,6 +890,9 @@ pub struct RuleAddArgs {
     pub from: Option<String>,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -556,6 +901,9 @@ pub struct RuleDeleteArgs {
     pub spec: String,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -563,6 +911,9 @@ pub struct ToggleArgs {
     pub enabled: bool,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -571,6 +922,9 @@ pub struct SshOptionsArgs {
     pub options: std::collections::BTreeMap<String, String>,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -580,6 +934,9 @@ pub struct KeyAddArgs {
     pub key: String,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -589,28 +946,20 @@ pub struct KeyRemoveArgs {
     pub fingerprint: String,
     #[serde(default = "yes")]
     pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ChangeIdArgs {
     /// id from list_pending_changes
     pub id: String,
+    pub reason: Option<String>,
 }
 
 fn op_err(e: crate::ops::proto::OpError) -> ErrorData {
     ErrorData::invalid_params(e.message, None)
-}
-
-/// Keeps the tail of a job log for the model.
-fn tail(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut cut = s.len() - max;
-    while !s.is_char_boundary(cut) {
-        cut += 1;
-    }
-    format!("…{}", &s[cut..])
 }
 
 impl McpServer {
@@ -622,63 +971,116 @@ impl McpServer {
         )
     }
 
-    /// Submits a change as `mcp`, waits for it, and returns status, result and log tail.
+    /// A write tool call: a dry run runs at once; a real change becomes a change request that
+    /// a person approves in the dashboard (or that runs at once when its policy is `auto`).
     async fn write(
         &self,
         ext: &rmcp::model::Extensions,
         call: &str,
         args: serde_json::Value,
         dry_run: bool,
+        reason: Option<String>,
     ) -> Result<CallToolResult, ErrorData> {
-        let parts = ext.get::<axum::http::request::Parts>();
-        let remote = parts
-            .and_then(|p| p.extensions.get::<crate::api::RemoteAddr>())
-            .and_then(|r| r.0.clone());
-        let actor = parts
-            .and_then(|p| p.extensions.get::<crate::auth::Principal>())
-            .map(|p| p.actor())
-            .unwrap_or_else(|| "unknown".into());
-        let summary = crate::ops::calls::summary(call, &args);
-        let id = crate::ops::submit(
-            &self.state,
-            crate::ops::Submit {
-                call: call.into(),
+        if dry_run {
+            let job = crate::approvals::run_host(
+                &self.state,
+                call,
                 args,
-                dry_run,
-                summary,
-                via: crate::ops::Via {
-                    via: "mcp",
-                    remote,
-                    actor,
-                },
-            },
-        )
-        .await
-        .map_err(|e| match e.downcast::<crate::ops::proto::OpError>() {
-            Ok(op) => op_err(op),
-            Err(e) => internal(e),
-        })?;
-        let job = crate::ops::wait(&self.state, id, std::time::Duration::from_secs(120))
+                true,
+                origin(ext).via(None),
+                std::time::Duration::from_secs(120),
+            )
             .await
-            .map_err(internal)?
-            .ok_or_else(|| ErrorData::internal_error("job vanished", None))?;
-        let out = serde_json::json!({
-            "job_id": job.id,
-            "status": job.status,
-            "dry_run": job.dry_run,
-            "error": job.error,
-            "result": job.result,
-            "log": tail(job.log.as_deref().unwrap_or(""), 6000),
-            "note": if job.status == "running" { "still running; poll get_ops_job" } else { "" },
-        });
-        if job.status == "failed" {
-            let text = serde_json::to_string(&out).unwrap_or_default();
+            .map_err(request_err)?;
+            let out = crate::approvals::job_view(&job);
+            return if job.status == "failed" {
+                Ok(CallToolResult::error(vec![
+                    rmcp::model::ContentBlock::text(out.to_string()),
+                ]))
+            } else {
+                json_result(&out)
+            };
+        }
+        self.request(ext, call, args, reason.unwrap_or_default())
+            .await
+    }
+
+    async fn request(
+        &self,
+        ext: &rmcp::model::Extensions,
+        action: &str,
+        args: serde_json::Value,
+        reason: String,
+    ) -> Result<CallToolResult, ErrorData> {
+        let r = crate::approvals::request(&self.state, action, args, &reason, origin(ext))
+            .await
+            .map_err(request_err)?;
+        let out = request_view(&r);
+        if r.status == "failed" {
             return Ok(CallToolResult::error(vec![
-                rmcp::model::ContentBlock::text(text),
+                rmcp::model::ContentBlock::text(out.to_string()),
             ]));
         }
         json_result(&out)
     }
+}
+
+/// Who is calling, from the HTTP request behind the MCP session.
+fn origin(ext: &rmcp::model::Extensions) -> crate::approvals::Origin {
+    let parts = ext.get::<axum::http::request::Parts>();
+    let remote = parts
+        .and_then(|p| p.extensions.get::<crate::api::RemoteAddr>())
+        .and_then(|r| r.0.clone());
+    let actor = parts
+        .and_then(|p| p.extensions.get::<crate::auth::Principal>())
+        .map(|p| p.actor())
+        .unwrap_or_else(|| "unknown".into());
+    crate::approvals::Origin {
+        source: "mcp",
+        actor,
+        remote,
+        conversation_id: None,
+        run_id: None,
+    }
+}
+
+fn request_err(e: anyhow::Error) -> ErrorData {
+    if let Some(i) = e.downcast_ref::<crate::settings::Invalid>() {
+        return ErrorData::invalid_params(i.0.clone(), None);
+    }
+    match e.downcast::<crate::ops::proto::OpError>() {
+        Ok(op) => op_err(op),
+        Err(e) => internal(e),
+    }
+}
+
+/// What an agent needs to know about its request.
+fn request_view(r: &crate::approvals::ChangeRequest) -> serde_json::Value {
+    let note = match r.status.as_str() {
+        "pending" => {
+            "waiting for a person to approve it in the dashboard; poll get_change_request (wait_secs up to 120)"
+        }
+        "approved" => "approved and running; poll get_change_request",
+        "executed" => "done",
+        "failed" => "failed; see error",
+        "rejected" => "rejected by a person; see note",
+        "expired" => "nobody approved it in time; ask again if still needed",
+        _ => "",
+    };
+    serde_json::json!({
+        "request_id": r.id,
+        "action": r.action,
+        "summary": r.summary,
+        "status": r.status,
+        "needs_approval": r.mode == "approve",
+        "preview": r.preview,
+        "result": r.result,
+        "error": r.error,
+        "note_from_approver": r.note,
+        "decided_by": r.decided_by,
+        "expires_at": r.expires_at,
+        "next": note,
+    })
 }
 
 #[tool_router(router = ops_router)]
@@ -702,6 +1104,7 @@ impl McpServer {
             "docker.container",
             serde_json::json!({ "id": a.container, "action": a.action }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -724,6 +1127,7 @@ impl McpServer {
             "docker.project",
             serde_json::json!({ "name": a.project, "action": a.action }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -747,6 +1151,7 @@ impl McpServer {
             "docker.image_pull",
             serde_json::json!({ "reference": a.reference }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -769,6 +1174,7 @@ impl McpServer {
             "docker.image_remove",
             serde_json::json!({ "id": a.image, "force": a.force }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -796,7 +1202,7 @@ impl McpServer {
                 ));
             }
         };
-        self.write(&ext, call, serde_json::json!({}), a.dry_run)
+        self.write(&ext, call, serde_json::json!({}), a.dry_run, a.reason)
             .await
     }
 
@@ -818,6 +1224,7 @@ impl McpServer {
             "docker.volume_remove",
             serde_json::json!({ "name": a.name }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -827,8 +1234,13 @@ impl McpServer {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn nginx_test(&self, ext: rmcp::model::Extensions) -> Result<CallToolResult, ErrorData> {
-        self.write(&ext, "nginx.test", serde_json::json!({}), false)
-            .await
+        self.request(
+            &ext,
+            "nginx.test",
+            serde_json::json!({}),
+            "nginx -t 检查配置".into(),
+        )
+        .await
     }
 
     #[tool(
@@ -845,8 +1257,14 @@ impl McpServer {
         ext: rmcp::model::Extensions,
         Parameters(a): Parameters<DryArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.write(&ext, "nginx.reload", serde_json::json!({}), a.dry_run)
-            .await
+        self.write(
+            &ext,
+            "nginx.reload",
+            serde_json::json!({}),
+            a.dry_run,
+            a.reason,
+        )
+        .await
     }
 
     #[tool(
@@ -868,6 +1286,7 @@ impl McpServer {
             "nginx.site",
             serde_json::json!({ "name": a.name, "enabled": a.enabled }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -892,7 +1311,7 @@ impl McpServer {
                 None,
             ));
         }
-        self.write(&ext, "nginx.write", serde_json::json!({ "path": a.path, "content": a.content, "base_sha256": a.base_sha256 }), a.dry_run).await
+        self.write(&ext, "nginx.write", serde_json::json!({ "path": a.path, "content": a.content, "base_sha256": a.base_sha256 }), a.dry_run, a.reason).await
     }
 
     #[tool(
@@ -909,7 +1328,8 @@ impl McpServer {
         Parameters(a): Parameters<RuleAddArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let args = serde_json::json!({ "action": a.action, "port": a.port, "proto": a.proto.unwrap_or_else(|| "any".into()), "from": a.from });
-        self.write(&ext, "firewall.add", args, a.dry_run).await
+        self.write(&ext, "firewall.add", args, a.dry_run, a.reason)
+            .await
     }
 
     #[tool(
@@ -930,6 +1350,7 @@ impl McpServer {
             "firewall.delete",
             serde_json::json!({ "spec": a.spec }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -952,6 +1373,7 @@ impl McpServer {
             "firewall.toggle",
             serde_json::json!({ "enabled": a.enabled }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -975,6 +1397,7 @@ impl McpServer {
             "ssh.set",
             serde_json::json!({ "options": a.options }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -998,6 +1421,7 @@ impl McpServer {
             "ssh.key_add",
             serde_json::json!({ "user": a.user, "key": a.key }),
             a.dry_run,
+            a.reason,
         )
         .await
     }
@@ -1020,8 +1444,25 @@ impl McpServer {
             "ssh.key_remove",
             serde_json::json!({ "user": a.user, "fingerprint": a.fingerprint }),
             a.dry_run,
+            a.reason,
         )
         .await
+    }
+
+    #[tool(
+        description = "Ask for any change in list_change_actions (alerts, analyses, the built-in agent, scheduled tasks, prompts, package updates, notification tests, and every server change). A reason is required. Actions that need approval wait for a person in the dashboard (host changes are dry-run first, so the request carries the plan or diff); the others run at once. Returns the request; poll get_change_request.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn request_change(
+        &self,
+        ext: rmcp::model::Extensions,
+        Parameters(a): Parameters<RequestChangeArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.request(&ext, &a.action, a.args, a.reason).await
     }
 
     #[tool(
@@ -1038,11 +1479,11 @@ impl McpServer {
         ext: rmcp::model::Extensions,
         Parameters(a): Parameters<ChangeIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.write(
+        self.request(
             &ext,
             "pending.revert",
             serde_json::json!({ "id": a.id }),
-            false,
+            a.reason.unwrap_or_else(|| "撤销待确认的变更".into()),
         )
         .await
     }
@@ -1079,5 +1520,5 @@ impl ServerHandler for McpServer {
     }
 }
 
-const INSTRUCTIONS: &str = "Operations view of one server. Diagnostics: system status, log analysis, real-time access analysis, host metrics, containers, alerts, findings and reports. Inventory: Docker (containers, compose projects, images, volumes, networks), nginx sites and config files, firewall rules, sshd effective config, authorized keys and login sessions (secrets redacted). \
-When connected to /mcp/ops, write tools are available as well. Every write tool is a dry run unless dry_run=false: call it once with the default to see the plan or diff, then repeat with dry_run=false. Changes run through a root helper that only permits what the host operator enabled. Firewall and sshd changes are applied provisionally and reverted automatically unless a person confirms them in the dashboard; you may call revert_change but cannot confirm. Before changing a file, read it with nginx_get_file and pass its sha256 as base_sha256; never write back redacted placeholders such as <redacted>.";
+const INSTRUCTIONS: &str = "Operations view of one server. Diagnostics: system status, log analysis, real-time access analysis, host metrics, containers, ports, databases, alerts, findings, reports and the built-in AI agent's conversations. Inventory: Docker (containers, compose projects, images, volumes, networks), nginx sites and config files, firewall rules, sshd effective config, authorized keys and login sessions (secrets redacted); scheduled tasks, prompts, notification channels, package jobs and the ops audit log. \
+When connected to /mcp/ops, you can also ask for changes. Server write tools are a dry run unless dry_run=false: call once with the default to see the plan or diff. A real change (dry_run=false, or request_change for anything in list_change_actions) needs a `reason` (the problem, your evidence, the expected effect) and becomes a change request: unless the operator lets that action run automatically, a person approves or rejects it in the dashboard, so the call returns status=pending; poll get_change_request with wait_secs. Do not report a change as done until its status is executed. Changes run through a root helper that only permits what the host operator enabled. Firewall and sshd changes are additionally applied provisionally and reverted unless a person confirms them; you may call revert_change but cannot confirm. Before changing a file, read it with nginx_get_file and pass its sha256 as base_sha256; never write back redacted placeholders such as <redacted>.";

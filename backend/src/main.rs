@@ -182,6 +182,7 @@ async fn run(cfg: config::Config) -> Result<()> {
     schedule::spawn(&state);
     telegram_bot::spawn(&state);
     tsmonitor::ops::spawn(&state);
+    tsmonitor::approvals::spawn(&state);
 
     let listener = tokio::net::TcpListener::bind(cfg.server.bind)
         .await

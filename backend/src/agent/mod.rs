@@ -174,6 +174,15 @@ enum Lane {
 
 /// Concurrent conversations; each one also holds at most one run at a time.
 const INTERACTIVE_SLOTS: usize = 2;
+/// Messages waiting for a free conversation slot (e.g. report items sent to the background).
+const MAX_QUEUED: usize = 10;
+
+/// A conversation message waiting for a slot; it runs under `run_id` once started.
+struct Queued {
+    run_id: String,
+    conversation: String,
+    text: String,
+}
 
 struct Active {
     lane: Lane,
@@ -217,6 +226,8 @@ pub struct AgentManager {
     last_used: Mutex<Instant>,
     /// Scheduled work postponed while the host is busy.
     deferred: Mutex<Vec<(Job, String)>>,
+    /// Conversation messages waiting for an interactive slot, oldest first.
+    queue: Mutex<std::collections::VecDeque<Queued>>,
 }
 
 async fn node_version(bin: &str) -> Option<(PathBuf, u32)> {
@@ -296,6 +307,7 @@ impl AgentManager {
             cancelled: Mutex::new(HashSet::new()),
             last_used: Mutex::new(Instant::now()),
             deferred: Mutex::new(Vec::new()),
+            queue: Mutex::new(std::collections::VecDeque::new()),
         });
         tokio::spawn(Self::reaper(Arc::downgrade(&mgr)));
         mgr
@@ -499,6 +511,8 @@ impl AgentManager {
     }
 
     /// Sends a user message to a conversation; the reply streams over SSE. Returns the run id.
+    /// When every conversation slot is busy the message waits in a short queue and starts (under
+    /// the returned run id) as soon as a slot frees up.
     pub async fn send_message(
         self: &Arc<Self>,
         conversation: &str,
@@ -510,20 +524,78 @@ impl AgentManager {
             .ok()
             .flatten()
             .ok_or(TriggerError::NotFound)?;
-        let run_id = self.reserve_interactive(&conv.id)?;
+        let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
+        match self.reserve_interactive(&conv.id, &run_id) {
+            Ok(()) => {
+                self.spawn_chat(run_id.clone(), conv, text.to_string());
+                Ok(run_id)
+            }
+            Err(busy) => {
+                let mut q = lock(&self.queue);
+                if q.len() >= MAX_QUEUED || q.iter().any(|x| x.conversation == conv.id) {
+                    return Err(busy);
+                }
+                q.push_back(Queued {
+                    run_id: run_id.clone(),
+                    conversation: conv.id,
+                    text: text.to_string(),
+                });
+                Ok(run_id)
+            }
+        }
+    }
+
+    /// Conversations with a message waiting for a slot.
+    pub fn queued_conversations(&self) -> HashSet<String> {
+        lock(&self.queue)
+            .iter()
+            .map(|q| q.conversation.clone())
+            .collect()
+    }
+
+    fn spawn_chat(
+        self: &Arc<Self>,
+        run_id: String,
+        conv: crate::model::Conversation,
+        text: String,
+    ) {
         let me = self.clone();
-        let id = run_id.clone();
-        let text = text.to_string();
         tokio::spawn(async move {
             if let Err(e) = me
-                .execute_chat(&id, &conv, &text, &ChatSpec::default())
+                .execute_chat(&run_id, &conv, &text, &ChatSpec::default())
                 .await
             {
-                tracing::error!("conversation run {id} failed: {e:#}");
+                tracing::error!("conversation run {run_id} failed: {e:#}");
             }
-            me.finish_active(&id);
+            me.finish_active(&run_id);
+            me.start_queued().await;
         });
-        Ok(run_id)
+    }
+
+    /// Starts queued messages while slots are free (skipping conversations still running).
+    async fn start_queued(self: &Arc<Self>) {
+        loop {
+            let next = {
+                let mut q = lock(&self.queue);
+                let pos = q
+                    .iter()
+                    .position(|x| self.reserve_interactive(&x.conversation, &x.run_id).is_ok());
+                pos.and_then(|i| q.remove(i))
+            };
+            let Some(next) = next else { return };
+            let conv = match self.state.upgrade() {
+                Some(state) => store::get_conversation(&state.db, &next.conversation)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            match conv {
+                Some(conv) => self.spawn_chat(next.run_id, conv, next.text),
+                // deleted while waiting
+                None => self.finish_active(&next.run_id),
+            }
+        }
     }
 
     /// One-shot, tool-less request recorded as its own conversation (visible in the console).
@@ -541,11 +613,12 @@ impl AgentManager {
         let conv = store::get_conversation(&state.db, &conv_id)
             .await?
             .context("conversation just created")?;
-        let run_id = self
-            .reserve_interactive(&conv_id)
+        let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
+        self.reserve_interactive(&conv_id, &run_id)
             .map_err(|_| anyhow!("当前进行中的对话已达上限，请稍后再试"))?;
         let result = self.execute_chat(&run_id, &conv, text, &spec).await;
         self.finish_active(&run_id);
+        self.start_queued().await;
         result?;
         let (run, steps) = store::get_run(&state.db, &run_id)
             .await?
@@ -561,8 +634,7 @@ impl AgentManager {
             .context("模型没有返回内容")
     }
 
-    fn reserve_interactive(&self, conversation: &str) -> Result<String, TriggerError> {
-        let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
+    fn reserve_interactive(&self, conversation: &str, run_id: &str) -> Result<(), TriggerError> {
         {
             let mut active = lock(&self.active);
             if let Some((id, _)) = active.iter().find(|(_, a)| a.conversation == conversation) {
@@ -577,14 +649,14 @@ impl AgentManager {
                 return Err(TriggerError::Busy(busy[0].clone()));
             }
             active.insert(
-                run_id.clone(),
+                run_id.to_string(),
                 Active {
                     lane: Lane::Interactive,
                     conversation: conversation.to_string(),
                 },
             );
         }
-        Ok(run_id)
+        Ok(())
     }
 
     /// Asks the sidecar to stop a run. Returns false when the run is not active.
@@ -830,7 +902,7 @@ impl AgentManager {
             "messages": prompt::normalize_turns(messages),
             "model": model_spec(&p),
             "max_steps": state.cfg.ai.max_steps,
-            "tools": if spec.tools { tools::definitions() } else { Vec::new() },
+            "tools": if spec.tools { tools::chat_definitions() } else { Vec::new() },
         });
         match self
             .run_with_timeout(&state, run_id, &conv.id, &mut seq, &msg)
@@ -881,12 +953,15 @@ impl AgentManager {
         seq: &mut i64,
         msg: &Value,
     ) -> Result<Outcome> {
+        let changes = msg["tools"]
+            .as_array()
+            .is_some_and(|t| t.iter().any(|d| d["name"] == "propose_change"));
         let mut link = self.open_link(state, run_id).await?;
         link.send(msg).await?;
         let timeout = Duration::from_secs(state.cfg.ai.timeout_secs);
         match tokio::time::timeout(
             timeout,
-            self.drive(state, &mut link, run_id, conversation, seq),
+            self.drive(state, &mut link, run_id, conversation, seq, changes),
         )
         .await
         {
@@ -1066,10 +1141,14 @@ impl AgentManager {
         run_id: &str,
         conversation: &str,
         seq: &mut i64,
+        changes: bool,
     ) -> Result<Outcome> {
+        // only conversation runs are offered propose_change; refuse it anywhere else
         let ctx = tools::ToolCtx {
             state,
             sandbox: &self.sandbox,
+            conversation: changes.then_some(conversation),
+            run_id: Some(run_id),
         };
         let mut last_text = None;
         loop {

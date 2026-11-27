@@ -717,8 +717,15 @@ async fn get_conversation(State(state): State<Shared>, Path(id): Path<String>) -
             v
         })
         .collect();
+    let queued = state
+        .agent()
+        .is_some_and(|a| a.queued_conversations().contains(&conv.id));
+    let requests =
+        crate::approvals::for_conversations(&state.db, std::slice::from_ref(&conv.id)).await?;
     let mut v = serde_json::to_value(conv).map_err(anyhow::Error::from)?;
     v["runs"] = json!(runs);
+    v["queued"] = json!(queued);
+    v["requests"] = json!(requests);
     Ok(Json(v))
 }
 
@@ -737,25 +744,60 @@ fn clean_message(text: &str) -> Result<String, ApiError> {
     Ok(t.to_string())
 }
 
-/// Accepts exactly one of `report_id`, `alert_id`, `run_id` or `text` (a note such as a package list).
+/// Report sections a conversation can be about (`context.item.section`).
+pub const REPORT_SECTIONS: &[&str] = &[
+    "root_causes",
+    "recommendations",
+    "security_risks",
+    "anomalies",
+];
+
+/// `{report_id, item: {section, index}, intent: explain|ask|fix}`: one item of a report.
+fn report_item_context(obj: &serde_json::Map<String, Value>) -> bool {
+    let item_ok = obj.get("item").is_none_or(|i| {
+        i.as_object().is_some_and(|o| {
+            o.len() == 2
+                && o.get("section")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| REPORT_SECTIONS.contains(&s))
+                && o.get("index")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|n| n < 100)
+        })
+    });
+    let intent_ok = obj.get("intent").is_none_or(|i| {
+        i.as_str()
+            .is_some_and(|s| matches!(s, "explain" | "ask" | "fix"))
+    });
+    obj.get("report_id").is_some_and(Value::is_i64)
+        && obj
+            .keys()
+            .all(|k| matches!(k.as_str(), "report_id" | "item" | "intent"))
+        && item_ok
+        && intent_ok
+}
+
+/// Accepts exactly one of `report_id` (optionally with one of its items), `alert_id`, `run_id`
+/// or `text` (a note such as a package list).
 fn clean_context(ctx: &Value) -> Result<Value, ApiError> {
     let obj = ctx
         .as_object()
         .ok_or_else(|| bad_request("context 必须是对象"))?;
-    let ok = obj.len() == 1
-        && (obj.get("report_id").is_some_and(Value::is_i64)
-            || obj.get("alert_id").is_some_and(Value::is_i64)
-            || obj
-                .get("run_id")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s.len() < 100)
-            || obj
-                .get("text")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s.chars().count() <= 20_000));
+    let ok = report_item_context(obj)
+        || obj.len() == 1
+            && (obj.get("report_id").is_some_and(Value::is_i64)
+                || obj.get("alert_id").is_some_and(Value::is_i64)
+                || obj
+                    .get("run_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s.len() < 100)
+                || obj
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s.chars().count() <= 20_000));
     if !ok {
         return Err(bad_request(
-            "context 只能包含 report_id、alert_id、run_id 或 text 之一",
+            "context 只能是 report_id（可附 item 与 intent）、alert_id、run_id 或 text 之一",
         ));
     }
     Ok(ctx.clone())
@@ -829,6 +871,30 @@ async fn delete_conversation(
         ));
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Conversations about a report and its items, with their change requests.
+async fn get_report_conversations(
+    State(state): State<Shared>,
+    Path(id): Path<i64>,
+) -> ApiResult<Value> {
+    let convs = store::report_conversations(&state.db, id).await?;
+    let queued = state
+        .agent()
+        .map(|a| a.queued_conversations())
+        .unwrap_or_default();
+    let ids: Vec<String> = convs.iter().map(|c| c.id.clone()).collect();
+    let requests = crate::approvals::for_conversations(&state.db, &ids).await?;
+    let list: Vec<Value> = convs
+        .into_iter()
+        .map(|c| {
+            let q = queued.contains(&c.id);
+            let mut v = json!(c);
+            v["queued"] = json!(q);
+            v
+        })
+        .collect();
+    Ok(Json(json!({ "conversations": list, "requests": requests })))
 }
 
 // ---------------------------------------------------------------- prompts & tasks
@@ -1264,6 +1330,92 @@ async fn get_ssh_sessions() -> ApiResult<Value> {
     Ok(Json(json!(crate::ops::sessions().await)))
 }
 
+// ---------------------------------------------------------------- change requests
+
+#[derive(Deserialize)]
+struct ApprovalsQ {
+    /// open (default) | all | a single status
+    status: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn get_approvals(
+    State(state): State<Shared>,
+    Query(q): Query<ApprovalsQ>,
+) -> ApiResult<Value> {
+    let status = match q.status.as_deref() {
+        None | Some("") | Some("open") => Some("open"),
+        Some("all") => None,
+        Some(s) => Some(s),
+    };
+    Ok(Json(json!({
+        "requests": crate::approvals::list(&state.db, status, q.limit.unwrap_or(100)).await?,
+        "pending": crate::approvals::pending_count(&state.db).await?,
+    })))
+}
+
+async fn get_approval(
+    State(state): State<Shared>,
+    Path(id): Path<i64>,
+) -> ApiResult<crate::approvals::ChangeRequest> {
+    crate::approvals::get(&state.db, id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("change request"))
+}
+
+async fn get_approval_policy(
+    State(state): State<Shared>,
+) -> ApiResult<Vec<crate::approvals::PolicyView>> {
+    Ok(Json(crate::approvals::policies(&state.db).await?))
+}
+
+/// Approving runs the change: same bar as changing the server from the dashboard.
+async fn post_approve(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    Path(id): Path<i64>,
+) -> AuthResult<crate::approvals::ChangeRequest> {
+    need_sudo(&p)?;
+    Ok(Json(
+        crate::approvals::approve(&state, id, &p.actor()).await?,
+    ))
+}
+
+#[derive(Deserialize, Default)]
+struct RejectBody {
+    note: Option<String>,
+}
+
+async fn post_reject(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    Path(id): Path<i64>,
+    body: Option<Json<RejectBody>>,
+) -> AuthResult<crate::approvals::ChangeRequest> {
+    let note = body.and_then(|b| b.0.note);
+    Ok(Json(
+        crate::approvals::reject(&state, id, &p.actor(), note.as_deref()).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct PolicyBody {
+    mode: String,
+}
+
+/// Loosening or tightening what agents may do without asking: password-confirmed accounts only.
+async fn put_approval_policy(
+    State(state): State<Shared>,
+    axum::Extension(p): axum::Extension<Principal>,
+    Path(action): Path<String>,
+    Json(b): Json<PolicyBody>,
+) -> AuthResult<Vec<crate::approvals::PolicyView>> {
+    need_sudo(&p)?;
+    crate::approvals::set_policy(&state.db, &action, &b.mode, &p.actor()).await?;
+    Ok(Json(crate::approvals::policies(&state.db).await?))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpsRun {
@@ -1655,6 +1807,12 @@ pub fn router(state: Shared) -> Router {
             axum::routing::delete(delete_user),
         )
         .route("/api/v1/auth/tokens", get(get_tokens).post(post_token))
+        .route("/api/v1/approvals/{id}/approve", post(post_approve))
+        .route("/api/v1/approvals/{id}/reject", post(post_reject))
+        .route(
+            "/api/v1/approvals/policy/{action}",
+            axum::routing::put(put_approval_policy),
+        )
         .route(
             "/api/v1/auth/tokens/{id}",
             axum::routing::delete(delete_token),
@@ -1685,6 +1843,13 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/reports", get(get_reports))
         .route("/api/v1/reports/latest", get(get_report_latest))
         .route("/api/v1/reports/{id}", get(get_report))
+        .route(
+            "/api/v1/reports/{id}/conversations",
+            get(get_report_conversations),
+        )
+        .route("/api/v1/approvals", get(get_approvals))
+        .route("/api/v1/approvals/policy", get(get_approval_policy))
+        .route("/api/v1/approvals/{id}", get(get_approval))
         .route("/api/v1/agent/runs", get(get_runs))
         .route("/api/v1/agent/runs/{id}", get(get_run))
         .route("/api/v1/agent/trigger", post(post_trigger))
@@ -1770,6 +1935,28 @@ pub fn router(state: Shared) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_context() {
+        let ok = |v: Value| clean_context(&v).is_ok();
+        assert!(ok(json!({ "report_id": 3 })));
+        assert!(ok(json!({ "alert_id": 3 })));
+        assert!(ok(
+            json!({ "report_id": 3, "item": { "section": "recommendations", "index": 1 }, "intent": "fix" })
+        ));
+        assert!(ok(
+            json!({ "report_id": 3, "item": { "section": "anomalies", "index": 0 } })
+        ));
+        assert!(!ok(
+            json!({ "report_id": 3, "item": { "section": "summary", "index": 0 } })
+        ));
+        assert!(!ok(
+            json!({ "report_id": 3, "item": { "section": "anomalies", "index": -1 } })
+        ));
+        assert!(!ok(json!({ "report_id": 3, "intent": "delete" })));
+        assert!(!ok(json!({ "report_id": 3, "alert_id": 1 })));
+        assert!(!ok(json!({ "alert_id": 3, "intent": "fix" })));
+    }
 
     #[test]
     fn origin_check() {

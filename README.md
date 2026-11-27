@@ -37,7 +37,8 @@
 - **守护进程只读**：守护进程里没有写宿主机、重启容器的调用；它自己只能修改本程序的运行设置（模型 Provider、任务路由等，存在本地数据库），这类写接口需要登录。Docker 只用 list/inspect/stats/logs/events；数据库只执行内置白名单语句；模型无法传入 SQL 或任意路径。
 - **修改只经过 root 助手**：管理 nginx、防火墙、SSH、Docker 的请求由守护进程转交给可选的运维助手（`tsmonitor helper`）执行。助手只接受 root 或 `allowed_uids` 用户的连接，并且要求共享密钥；每个领域默认关闭，开启后也只能执行 `allow` 中列出的操作；命令以参数数组执行，不经过 shell。没有安装助手时，界面和 MCP 只能查看。
 - **登录**：首次启动时由 setup 向导创建管理员（需要服务器上 `<data_dir>/setup-code` 中的一次性 setup 码，防止他人抢先注册）；之后面板、REST、SSE、MCP 都需要认证。浏览器使用 HttpOnly、SameSite=Strict 的会话 Cookie；密码用 argon2id 存储，连续 5 次失败锁定 15 分钟。忘记密码时在主机上执行 `tsmonitor --config /etc/tsmonitor/config.toml reset-password --user <名字>`。
-- **修改服务器需二次确认**：面板上的运维修改、账号与令牌管理，需要在 10 分钟内确认过一次密码。机器访问（MCP、脚本）使用「设置 → API 令牌」签发的令牌：`read` 可访问 REST 读接口与 `/mcp`，`ops` 还可访问 `/mcp/ops` 修改服务器。内置 Agent 只有只读工具。
+- **修改服务器需二次确认**：面板上的运维修改、账号与令牌管理，需要在 10 分钟内确认过一次密码。机器访问（MCP、脚本）使用「设置 → API 令牌」签发的令牌：`read` 可访问 REST 读接口与 `/mcp`，`ops` 还可访问 `/mcp/ops` 申请修改服务器。内置 Agent 只有只读工具和“提交变更申请”。
+- **Agent 的修改要人批准**：内置 Agent 和外部 Agent（MCP）都不能直接改东西，只能提交带调用理由的变更申请；服务器变更会先预演，在「变更审批」页由人确认密码后批准才执行，30 分钟无人处理自动过期。哪些操作需要批准、哪些自动放行，在「变更审批 → 批准策略」里按操作设置（修改需确认密码）。账号、API 令牌和密钥类设置不对 Agent 开放。
 - **等同 root 的能力**：Docker 管理和 nginx 配置编辑本质上等同 root 权限（nginx 以 root 加载配置；能控制容器就能控制宿主机）。面板拦截了明显的越权写法（`load_module`、`user`、perl/js/lua、/var/log 之外的日志路径等），但请只把账号和 `ops` 令牌交给可以拥有 root 的人或 Agent。
 - **脱敏**：密码、令牌、API Key、JWT、邮箱、卡号等在入库和进入模型上下文之前就被替换。
 - **AI 子进程**：Node 进程只拿到模型密钥（通过环境变量），没有任何读文件或执行命令的工具；所有工具都在 Rust 侧执行。
@@ -154,8 +155,9 @@ hourly = "fast"
 大屏的“Agent”页列出所有会话：定时巡检、日报、事件分析、审计等自动任务各是一个会话，可以看到模型的每条消息和每次工具调用（含输入输出）；也可以点“新对话”直接提问，回复会实时流式显示，并可随时停止。
 
 - 在自动任务的会话里继续输入，就是针对这次分析追问；报告页的“向 Agent 追问”会带着该报告新建对话。
-- 对话和自动任务分两条通道：定时任务运行时依然可以对话（最多同时 2 个对话），互不阻塞；对话与自动分析各自计入每日 `daily_budget`。
-- 对话中的 Agent 与自动分析使用同一套只读工具，只能给出建议和命令，不会执行修改。
+- 报告里的每一条根因、建议、安全风险和异常下面都有“详情 / 让 Agent 解释 / 追问 / 让 Agent 修复”。后三项在后台运行，不用离开报告页；状态会显示在这一条下面，“详情”抽屉里能看到 Agent 的最新回答、继续追问，并直接批准它提交的变更申请。
+- 对话和自动任务分两条通道：定时任务运行时依然可以对话（最多同时 2 个对话，再多的消息排队，队列上限 10 条），互不阻塞；对话与自动分析各自计入每日 `daily_budget`。
+- 对话中的 Agent 与自动分析使用同一套只读工具；对话里另外可以用 `propose_change` 提交变更申请（见「变更审批」）。批准并执行后，结果会回到原对话，Agent 会自行核对效果。
 
 ## 自动任务与提示词库
 
@@ -207,8 +209,8 @@ hourly = "fast"
 
 - REST + SSE：见 [`docs/api.md`](docs/api.md)。
 - MCP（Streamable HTTP），两个入口：
-  - `http://127.0.0.1:8787/mcp`：只读。诊断工具（`get_health_snapshot`、`list_alerts`、`get_latest_report`、`get_report`、`list_findings`、`get_system_status`、`analyze_logs`、`get_access_stats`、`get_access_history`、`get_host_metrics`、`search_log_clusters`、`list_containers`、`list_package_updates`），以及服务器清单（`get_ops_capabilities`、`docker_inventory`、`docker_list_images/volumes/networks`、`nginx_list_sites`、`nginx_list_files`、`nginx_get_file`、`firewall_status`、`ssh_get_config`、`ssh_list_keys`、`ssh_list_sessions`、`list_ops_jobs`、`get_ops_job`、`list_pending_changes`）。敏感值已打码。
-  - `http://127.0.0.1:8787/mcp/ops`：在只读工具之外再提供修改工具（`docker_container_action`、`docker_project_action`、`docker_image_pull`、`docker_image_remove`、`docker_prune`、`docker_volume_remove`、`nginx_test`、`nginx_reload`、`nginx_site_toggle`、`nginx_write_file`、`firewall_rule_add`、`firewall_rule_delete`、`firewall_toggle`、`ssh_set_options`、`ssh_key_add`、`ssh_key_remove`、`revert_change`）。需要 `ops` 范围的 API 令牌；所有修改工具默认演练，需显式传 `dry_run: false`；没有确认变更的工具。
+  - `http://127.0.0.1:8787/mcp`：只读。诊断工具（`get_health_snapshot`、`list_alerts`、`get_latest_report`、`get_report`、`list_reports`、`list_findings`、`get_system_status`、`analyze_logs`、`get_access_stats`、`get_access_history`、`get_host_metrics`、`search_log_clusters`、`list_containers`、`get_container_logs`、`list_log_sources`、`get_log_rates`、`list_ports`、`get_db_metrics`、`list_package_updates`），面板数据（`list_conversations`、`get_conversation`、`list_tasks`、`list_prompts`、`list_notify_channels`、`list_package_jobs`、`get_package_job`、`get_ops_audit`），变更申请（`list_change_actions`、`list_change_requests`、`get_change_request`），以及服务器清单（`get_ops_capabilities`、`docker_inventory`、`docker_list_images/volumes/networks`、`nginx_list_sites`、`nginx_list_files`、`nginx_get_file`、`firewall_status`、`ssh_get_config`、`ssh_list_keys`、`ssh_list_sessions`、`list_ops_jobs`、`get_ops_job`、`list_pending_changes`）。敏感值已打码。
+  - `http://127.0.0.1:8787/mcp/ops`：在只读工具之外再提供修改工具（`docker_container_action`、`docker_project_action`、`docker_image_pull`、`docker_image_remove`、`docker_prune`、`docker_volume_remove`、`nginx_test`、`nginx_reload`、`nginx_site_toggle`、`nginx_write_file`、`firewall_rule_add`、`firewall_rule_delete`、`firewall_toggle`、`ssh_set_options`、`ssh_key_add`、`ssh_key_remove`、`revert_change`）。另有 `request_change`，可申请面板上的其他操作（处理告警、触发分析、让内置 Agent 分析、定时任务、提示词、软件包更新、测试通知）。需要 `ops` 范围的 API 令牌；所有修改工具默认演练，真正修改（`dry_run: false`）必须填写 `reason`，并成为一条变更申请，按批准策略由人批准或自动放行；没有确认变更的工具。详见 [docs/mcp.md](docs/mcp.md)。
   - 通过反向代理访问时，把域名加入 `[server] mcp_allowed_hosts`。接入示例见 [`docs/mcp.md`](docs/mcp.md)。
 - 访问分析：配置 `kind = "nginx_access"` 的日志源后，日志页显示请求量、状态码、P50/P95/P99 延迟（日志格式需包含 `$request_time`）、热门与慢接口、虚拟主机、UA 分类和可疑来源；支持 combined 格式和 JSON 访问日志。按分钟持久化，可查看 24 小时 / 7 天 / 30 天历史。5xx 比例、单地址请求洪泛、扫描敏感路径，以及路径或参数中的 SQL / 脚本 / 命令注入载荷（URL 解码后匹配，不看状态码和速率）会触发告警（阈值见 `[thresholds] access_*`）。
 - systemd journal：默认把 warning 及以上级别的日志作为 `journal` 日志源；`[journal] units` 中的单元会完整跟读。没有 `/var/log/auth.log` 的主机会改用 journal 做 SSH 登录审计。

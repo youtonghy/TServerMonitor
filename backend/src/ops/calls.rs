@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use super::proto::{OpError, OpResult};
 
-/// (call, may an MCP agent invoke it)
+/// (call, may an agent (MCP or the built-in one, through an approved request) invoke it)
 pub const WRITE_CALLS: &[(&str, bool)] = &[
     ("docker.container", true),
     ("docker.project", true),
@@ -30,9 +30,9 @@ pub const WRITE_CALLS: &[(&str, bool)] = &[
     ("pending.confirm", false),
 ];
 
-pub fn check(call: &str, from_mcp: bool) -> OpResult<()> {
+pub fn check(call: &str, from_agent: bool) -> OpResult<()> {
     match WRITE_CALLS.iter().find(|(c, _)| *c == call) {
-        Some((_, mcp_ok)) if !from_mcp || *mcp_ok => Ok(()),
+        Some((_, agent_ok)) if !from_agent || *agent_ok => Ok(()),
         Some(_) => Err(OpError::not_allowed(
             "确认变更只能由人在面板上操作（确认前请先新开 SSH 会话测试登录）",
         )),

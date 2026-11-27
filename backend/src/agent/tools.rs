@@ -3,8 +3,9 @@
 //!    (nginx, firewall, SSH, Docker; secrets redacted);
 //! 2. workspace tools (export a redacted log sample, write a script, run it in the sandbox).
 //!
-//! The built-in agent never gets write tools: changes are only made from the dashboard or by
-//! an external agent on `/mcp/ops`.
+//! The built-in agent never changes anything itself. In conversations it gets
+//! `propose_change`, which files a change request (`approvals`): a person approves it in the
+//! dashboard unless the operator set that action to run automatically.
 //!
 //! Tool execution happens here in Rust; the Node sidecar only forwards calls.
 
@@ -23,6 +24,9 @@ const MAX_RESULT_CHARS: usize = 24_000;
 pub struct ToolCtx<'a> {
     pub state: &'a Shared,
     pub sandbox: &'a Sandbox,
+    /// Set for conversation runs: enables `propose_change`.
+    pub conversation: Option<&'a str>,
+    pub run_id: Option<&'a str>,
 }
 
 /// Read-only tools that are also served over MCP (the workspace/script tools are not).
@@ -34,7 +38,32 @@ pub const MCP_SHARED: &[&str] = &[
     "search_log_clusters",
     "list_containers",
     "list_package_updates",
+    "get_container_logs",
+    "list_log_sources",
+    "get_log_rates",
+    "list_ports",
+    "get_db_metrics",
 ];
+
+/// Conversation tools: the read-only set plus filing change requests.
+pub fn chat_definitions() -> Vec<Value> {
+    let mut d = definitions();
+    d.push(json!({
+        "name": "list_change_actions",
+        "description": "列出可以申请的变更操作：名称、说明、是否需要人工批准，以及参数格式。提交 propose_change 前先看这里。",
+        "input_schema": { "type": "object", "properties": {}, "additionalProperties": false }
+    }));
+    d.push(json!({
+        "name": "propose_change",
+        "description": "提交一项变更申请（你不能直接修改服务器）。需要批准的操作会先预演（给出计划或 diff），等人在面板上批准后才执行；设为自动放行的操作会立即执行。返回申请状态：pending（等待批准）、executed（已执行）、failed（失败，见 error）。一次只申请一件事。",
+        "input_schema": { "type": "object", "properties": {
+            "action": { "type": "string", "description": "list_change_actions 返回的操作名，如 nginx.write、firewall.add" },
+            "args": { "type": "object", "description": "该操作的参数，格式见 list_change_actions" },
+            "reason": { "type": "string", "description": "调用理由：为什么要改、依据的证据、预期效果（给批准人看）" }
+        }, "required": ["action", "args", "reason"], "additionalProperties": false }
+    }));
+    d
+}
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -466,6 +495,39 @@ pub async fn execute(ctx: &ToolCtx<'_>, name: &str, input: &Value) -> Result<Val
             json!(ctx.sandbox.run_python(&a.script, &a.args).await?)
         }
         "list_workspace" => json!(ctx.sandbox.list()),
+        "list_change_actions" => json!(crate::approvals::catalog_view(&state.db, true).await?),
+        "propose_change" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                action: String,
+                #[serde(default)]
+                args: Value,
+                reason: String,
+            }
+            let a: A = parse(input)?;
+            let Some(conversation) = ctx.conversation else {
+                bail!("只能在对话中提交变更申请");
+            };
+            let origin = crate::approvals::Origin {
+                source: "agent",
+                actor: format!("agent:{conversation}"),
+                remote: None,
+                conversation_id: Some(conversation.to_string()),
+                run_id: ctx.run_id.map(str::to_string),
+            };
+            let r = crate::approvals::request(state, &a.action, a.args, &a.reason, origin).await?;
+            json!({
+                "request_id": r.id,
+                "status": r.status,
+                "summary": r.summary,
+                "needs_approval": r.mode == "approve",
+                "preview": r.preview,
+                "result": r.result,
+                "error": r.error,
+                "expires_at": crate::rules::fmt_time(r.expires_at),
+            })
+        }
         "get_ops_inventory" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]

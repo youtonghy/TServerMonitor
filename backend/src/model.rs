@@ -519,6 +519,11 @@ pub enum Event {
     },
     /// Changes waiting for confirmation (the full current list).
     OpsPending(serde_json::Value),
+    /// A change request was filed or changed state (see `approvals`).
+    Approval {
+        id: i64,
+        status: String,
+    },
     /// Runtime settings changed; carries no secrets.
     Settings {
         generation: u64,
@@ -539,6 +544,7 @@ impl Event {
             Self::PackageJob { .. } => "package_job",
             Self::OpsJob { .. } => "ops_job",
             Self::OpsPending(_) => "ops_pending",
+            Self::Approval { .. } => "approval",
         }
     }
 
@@ -569,6 +575,7 @@ impl Event {
                 Ok(serde_json::json!({ "id": id, "status": status, "line": line }))
             }
             Self::OpsPending(v) => Ok(v.clone()),
+            Self::Approval { id, status } => Ok(serde_json::json!({ "id": id, "status": status })),
         }
         .unwrap_or(serde_json::Value::Null)
     }

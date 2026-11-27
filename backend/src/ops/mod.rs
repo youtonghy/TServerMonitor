@@ -36,7 +36,7 @@ const CAPS_TTL_MS: i64 = 30_000;
 /// Who asked for a change.
 #[derive(Debug, Clone, Serialize)]
 pub struct Via {
-    /// web | mcp
+    /// web | mcp | agent (built-in agent, approved request)
     pub via: &'static str,
     pub remote: Option<String>,
     /// account name, `token:<name>` or `legacy-token`
@@ -408,7 +408,7 @@ pub async fn list_audit(db: &crate::store::Db, limit: i64) -> Result<Vec<AuditEn
 }
 
 /// Replaces bulky or sensitive arguments before they are stored.
-fn redact_args(args: &Value) -> Value {
+pub fn redact_args(args: &Value) -> Value {
     let mut v = args.clone();
     if let Some(o) = v.as_object_mut() {
         if let Some(c) = o.get("content").and_then(Value::as_str) {
@@ -465,7 +465,7 @@ async fn audit(
 /// Starts a change in the helper and returns the job id at once. The job keeps running if
 /// the HTTP or MCP client goes away.
 pub async fn submit(state: &Shared, s: Submit) -> Result<i64> {
-    if let Err(e) = calls::check(&s.call, s.via.via == "mcp") {
+    if let Err(e) = calls::check(&s.call, s.via.via != "web") {
         audit(state, &s, "refused", Some(&e.message), None).await;
         return Err(e.into());
     }

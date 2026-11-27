@@ -186,6 +186,7 @@ interface AgentStep {
 | GET | `/api/v1/reports?kind=&limit=50` | `ReportSummary[]` newest first |
 | GET | `/api/v1/reports/latest?kind=` | `Report` or 404 |
 | GET | `/api/v1/reports/{id}` | `Report` |
+| GET | `/api/v1/reports/{id}/conversations` | `{ conversations: (Conversation & { queued: boolean })[]; requests: ChangeRequest[] }`: conversations started about the report or one of its items (oldest first) and the change requests they filed |
 | GET | `/api/v1/agent/runs?limit=50` | `AgentRun[]` newest first |
 | GET | `/api/v1/agent/runs/{id}` | `AgentRun & { steps: AgentStep[] }` |
 | POST | `/api/v1/agent/trigger` body `{ "kind": ReportKind }` | `202 { run_id: string }`; `409` when a run is already in progress |
@@ -196,9 +197,9 @@ interface AgentStep {
 | DELETE (admin) | `/api/v1/settings/providers/{id}` | `{ ok: true }`; routes using it are removed |
 | POST (admin) | `/api/v1/settings/models` body `{ provider_id?, api_format?, base_url?, auth?, api_key? }` | `{ models: string[] }` from `{base_url}/models`; a stored key is only sent to the URL it was saved for |
 | GET | `/api/v1/conversations?kind=chat\|task&limit=100` | `Conversation[]` newest activity first |
-| GET | `/api/v1/conversations/{id}` | `Conversation` with `runs: (AgentRun & { steps: AgentStep[] })[]` (oldest first) instead of the count |
+| GET | `/api/v1/conversations/{id}` | `Conversation` with `runs: (AgentRun & { steps: AgentStep[] })[]` (oldest first) instead of the count, plus `queued: boolean` (a message waits for a slot) and `requests: ChangeRequest[]` |
 | POST (admin) | `/api/v1/conversations` body `{ title?, context?, message? }` | `201 { id, run_id: string \| null }`; with `message` the first reply starts at once |
-| POST (admin) | `/api/v1/conversations/{id}/messages` body `{ text }` (≤ 8000 chars) | `202 { run_id }`; `409` while this conversation has a running turn or both interactive slots are busy |
+| POST (admin) | `/api/v1/conversations/{id}/messages` body `{ text }` (≤ 8000 chars) | `202 { run_id }`. When both interactive slots are busy (or this conversation is still answering) the message waits in a queue of 10 and starts under that `run_id` later; `409` when the queue is full or the conversation already has a queued message |
 | DELETE (admin) | `/api/v1/conversations/{id}` | `{ ok: true }`; only `kind = "chat"` (scheduled runs are kept with their reports) |
 | POST (admin) | `/api/v1/agent/runs/{id}/cancel` | `{ ok: true }`; `404` when the run is not active |
 | POST (admin) | `/api/v1/alerts/{id}/ack` | `Alert` |
@@ -221,6 +222,12 @@ interface AgentStep {
 | GET | `/api/v1/ops/jobs/{id}` | `OpsJob` with `log` |
 | GET | `/api/v1/ops/audit?limit=` | `AuditEntry[]`, newest first (includes refused requests) |
 | GET | `/api/v1/ops/pending` | `PendingChange[]` firewall/sshd changes waiting for confirmation |
+| GET | `/api/v1/approvals?status=open\|all\|<status>&limit=100` | `{ requests: ChangeRequest[]; pending: number }` change requests filed by agents, newest first (`open` = pending) |
+| GET | `/api/v1/approvals/{id}` | `ChangeRequest` |
+| POST (account + sudo) | `/api/v1/approvals/{id}/approve` | `ChangeRequest` (`approved`); the change runs in the background and the request becomes `executed` or `failed` (`approval` events). `400` when it is not pending or expired, `403 sudo_required` |
+| POST (account) | `/api/v1/approvals/{id}/reject` body `{ note? }` | `ChangeRequest` (`rejected`); the note is shown to the agent |
+| GET | `/api/v1/approvals/policy` | `ApprovalPolicy[]` every action agents can ask for, with its current mode |
+| PUT (account + sudo) | `/api/v1/approvals/policy/{action}` body `{ mode: "approve" \| "auto" }` | `ApprovalPolicy[]` |
 | POST (ops) | `/api/v1/ops/run` body `{ call; args?; dry_run? }` | `OpsJob` after up to 20 s (`status` may still be `running`; follow `ops_job` events). See the call list below. `403` not allowed / no helper / `sudo_required` / `scope_required`, `400` invalid, `409` busy or stale `base_sha256`, `502` the change failed and was rolled back |
 | GET | `/api/v1/tasks` | `{ tasks: Task[]; system: SystemJob[] }` (`system` = fixed `[schedule]` jobs, read-only) |
 | POST (admin) | `/api/v1/tasks` body `TaskInput` (`name`, `trigger`, `prompt_id` required) | `{ id }` |
@@ -247,11 +254,27 @@ interface ProviderInput { name?; api_format?; base_url?; auth?; default_model?; 
 // provider: a DB provider id or a config profile name; empty model = provider default
 interface Route { kind: string; provider: string; model: string; effort: Effort }
 // Every agent run belongs to a conversation. Scheduled runs get one each ("c_<run id>");
-// a chat holds one run per user turn. context: one of {report_id} | {alert_id} | {run_id} | {text}.
+// a chat holds one run per user turn. context: one of {report_id} | {alert_id} | {run_id} | {text};
+// a report context may name one item and what to do with it:
+// { report_id, item?: { section: "root_causes" | "recommendations" | "security_risks" | "anomalies"; index }, intent?: "explain" | "ask" | "fix" }.
 interface Conversation {
   id: string; title: string; kind: string /* "chat" or a report kind */; context: object | null;
   created_at: number; updated_at: number; last_status: AgentRun["status"] | null; runs: number;
 }
+
+// a change an agent asked for (built-in agent: propose_change; MCP: write tools / request_change)
+interface ChangeRequest {
+  id: number; action: string /* catalog name, e.g. nginx.write, alert.ack */; label: string;
+  kind: "host" | "panel"; summary: string; args: object /* redacted: file contents as size + hash */;
+  reason: string; source: "agent" | "mcp"; actor: string | null; remote: string | null;
+  conversation_id: string | null; run_id: string | null;
+  mode: "approve" | "auto"; status: "pending" | "approved" | "rejected" | "expired" | "executed" | "failed";
+  preview: object | null /* dry run of a host change: { job_id, status, result (diff / plan), log } */;
+  result: object | null; error: string | null; job_id: number | null;
+  created_at: number; expires_at: number /* 30 min after created_at */; decided_at: number | null;
+  decided_by: string | null /* account, or "auto" */; note: string | null; finished_at: number | null;
+}
+interface ApprovalPolicy { action: string; label: string; kind: "host" | "panel"; default: "approve" | "auto"; mode: "approve" | "auto"; agent: boolean }
 type Trigger =
   | { type: "interval"; every_mins: number }            // 5..10080
   | { type: "daily"; at: "HH:MM" }                       // local time, fires once per day (catch-up later the same day)
@@ -345,28 +368,35 @@ mostly 4xx), and `top_ips[].s4xx` / `scan`; series points carry `p95_ms`.
 | `package_job` | `{ id; status; line: string \| null }` one output line, or a status change when `line` is null |
 | `ops_job` | same shape as `package_job`, for ops helper jobs |
 | `ops_pending` | `PendingChange[]` (the full current list) whenever it changes |
+| `approval` | `{ id; status }` a change request was filed or changed state |
 
 A `ping` comment is sent every 15 s.
 
 ## MCP
 
-`POST/GET /mcp` serves the Model Context Protocol over Streamable HTTP. Tools:
-`get_health_snapshot`, `list_alerts { status?, limit? }`, `get_latest_report { kind? }`,
-`get_report { id }`, `list_findings`, plus the analysis tools shared with the built-in agent:
-`get_system_status`, `analyze_logs { since_hours?, source? }`, `get_access_stats { window_mins? }`
-(client addresses masked), `get_host_metrics { range }`, `search_log_clusters { source?, level?, query?, since_hours?, limit? }`,
-`list_containers`, `list_package_updates`, `get_access_history { range }`, and the server inventory:
-`get_ops_capabilities`, `docker_inventory`, `docker_list_images`, `docker_list_volumes`, `docker_list_networks`,
-`nginx_list_sites`, `nginx_list_files`, `nginx_get_file { path }` (secret values replaced with `<redacted>`),
+`POST/GET /mcp` serves the Model Context Protocol over Streamable HTTP. Read-only tools:
+`get_health_snapshot`, `list_alerts { status?, limit? }`, `get_latest_report { kind? }`, `get_report { id }`,
+`list_reports { kind?, limit? }`, `list_findings`, the analysis tools shared with the built-in agent
+(`get_system_status`, `analyze_logs`, `get_access_stats` (client addresses masked), `get_host_metrics`,
+`search_log_clusters`, `list_containers`, `get_container_logs`, `list_log_sources`, `get_log_rates`, `list_ports`,
+`get_db_metrics`, `list_package_updates`), `get_access_history { range }`, the server inventory
+(`get_ops_capabilities`, `docker_inventory`, `docker_list_images`, `docker_list_volumes`, `docker_list_networks`,
+`nginx_list_sites`, `nginx_list_files`, `nginx_get_file { path }` (secrets replaced with `<redacted>`),
 `firewall_status`, `ssh_get_config`, `ssh_list_keys`, `ssh_list_sessions`, `list_ops_jobs`, `get_ops_job`,
-`list_pending_changes`. These are read-only; the agent's workspace/script tools are not exposed, and
-package upgrades are never available over MCP.
+`get_ops_audit`, `list_pending_changes`), the panel's own state (`list_conversations`, `get_conversation { id }`,
+`list_tasks`, `list_prompts`, `list_notify_channels` (no secrets), `list_package_jobs`, `get_package_job`),
+and change requests (`list_change_actions`, `list_change_requests { status?, limit? }`,
+`get_change_request { id, wait_secs? }`). The agent's workspace/script tools are not exposed; accounts, API
+tokens, provider keys and channel secrets are never available over MCP.
 
-`/mcp` needs any API token (or session); `/mcp/ops` serves the same tools plus write tools and needs an `ops` token. Every write
-tool defaults to `dry_run: true`; it returns `{ job_id, status, dry_run, error, result, log }` after up to
-120 s. Firewall and sshd changes are provisional (`result.pending`) and revert unless a person confirms them
-in the dashboard; `revert_change { id }` is available, confirming is not. `nginx_write_file` refuses content
-that still contains redaction placeholders. See [mcp.md](mcp.md) for client configuration.
+`/mcp` needs any API token (or session); `/mcp/ops` adds the write tools and needs an `ops` token. Server write
+tools default to `dry_run: true` and return `{ job_id, status, dry_run, error, result, log }`. A real change
+(`dry_run: false`, or `request_change { action, args, reason }` for anything in `list_change_actions`) requires a
+`reason` and becomes a `ChangeRequest`: actions whose policy is `approve` (every server change by default) are
+dry-run and wait for a person in the dashboard (`status: "pending"`); `auto` ones run at once. Firewall and sshd
+changes are additionally provisional (`result.pending`) and revert unless a person confirms them;
+`revert_change { id }` is available, confirming is not. `nginx_write_file` refuses content that still contains
+redaction placeholders. See [mcp.md](mcp.md) for client configuration.
 
 The MCP endpoints accept loopback `Host` headers plus `server.mcp_allowed_hosts`.
 
