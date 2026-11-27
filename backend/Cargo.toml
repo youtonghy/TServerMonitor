@@ -47,9 +47,12 @@ url = "2.5.8"
 lettre = { version = "0.11.24", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls", "aws-lc-rs", "rustls-platform-verifier"] }
 similar = "2"
 argon2 = { version = "0.6", features = ["getrandom"] }
+x509-parser = "0.18"
+instant-acme = { version = "0.8", features = ["rcgen"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+rcgen = "0.14"

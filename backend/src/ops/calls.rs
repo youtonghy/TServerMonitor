@@ -19,6 +19,11 @@ pub const WRITE_CALLS: &[(&str, bool)] = &[
     ("nginx.reload", true),
     ("nginx.site", true),
     ("nginx.write", true),
+    ("nginx.site_save", true),
+    ("nginx.site_delete", true),
+    ("nginx.cert_issue", true),
+    // private keys must not pass through an agent
+    ("nginx.cert_upload", false),
     ("firewall.add", true),
     ("firewall.delete", true),
     ("firewall.toggle", true),
@@ -33,9 +38,10 @@ pub const WRITE_CALLS: &[(&str, bool)] = &[
 pub fn check(call: &str, from_agent: bool) -> OpResult<()> {
     match WRITE_CALLS.iter().find(|(c, _)| *c == call) {
         Some((_, agent_ok)) if !from_agent || *agent_ok => Ok(()),
-        Some(_) => Err(OpError::not_allowed(
+        Some(_) if call == "pending.confirm" => Err(OpError::not_allowed(
             "确认变更只能由人在面板上操作（确认前请先新开 SSH 会话测试登录）",
         )),
+        Some(_) => Err(OpError::not_allowed(format!("{call} 只能由人在面板上操作"))),
         None => Err(OpError::invalid(format!("不支持的操作 {call}"))),
     }
 }
@@ -80,6 +86,30 @@ pub fn summary(call: &str, args: &Value) -> String {
             s(args, "name")
         ),
         "nginx.write" => format!("修改 nginx 配置 {}", s(args, "path")),
+        "nginx.site_save" => {
+            let spec = &args["spec"];
+            let domains = spec["domains"]
+                .as_array()
+                .map(|d| {
+                    d.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            format!(
+                "{}站点 {}（{domains}）",
+                if args["base_sha256"].as_str().is_some_and(|b| !b.is_empty()) {
+                    "修改"
+                } else {
+                    "创建"
+                },
+                s(spec, "name")
+            )
+        }
+        "nginx.site_delete" => format!("删除站点 {}", s(args, "name")),
+        "nginx.cert_upload" => format!("为站点 {} 上传证书", s(args, "name")),
+        "nginx.cert_issue" => format!("为站点 {} 申请证书", s(args, "name")),
         "firewall.add" => format!(
             "添加防火墙规则 {} {}/{}{}",
             s(args, "action"),
@@ -133,6 +163,16 @@ mod tests {
         assert!(check("docker.container", true).is_ok());
         assert!(check("pending.confirm", false).is_ok());
         assert!(check("pending.confirm", true).is_err());
+        assert!(check("nginx.cert_upload", false).is_ok());
+        assert!(check("nginx.cert_upload", true).is_err());
+        assert!(check("nginx.site_save", true).is_ok());
+        assert_eq!(
+            summary(
+                "nginx.site_save",
+                &json!({ "spec": { "name": "app", "domains": ["a.com", "b.com"] } })
+            ),
+            "创建站点 app（a.com, b.com）"
+        );
         assert!(check("docker.images", false).is_err());
         assert!(check("hello", false).is_err());
         assert_eq!(

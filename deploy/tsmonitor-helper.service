@@ -34,7 +34,7 @@ RestartSec=5
 # Writable: what the enabled domains change, plus backups. Everything else is read-only.
 ProtectSystem=strict
 # "-" = optional: hosts without ufw, firewalld or nginx still start the helper
-ReadWritePaths=/var/lib/tsmonitor-helper -/etc/nginx -/etc/ssh -/etc/ufw -/etc/firewalld -/var/log/nginx /run
+ReadWritePaths=/var/lib/tsmonitor-helper -/etc/nginx -/etc/ssh -/etc/ufw -/etc/firewalld -/var/log/nginx -/var/www /run
 # authorized_keys live in home directories (opened with O_NOFOLLOW, owner-checked)
 ProtectHome=no
 PrivateTmp=yes

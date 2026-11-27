@@ -144,6 +144,30 @@ pub const CATALOG: &[ActionDef] = &[
         r#"{"path": "相对路径，如 sites-available/shop", "content": "完整新内容（不能含 <redacted>）", "base_sha256": "get_nginx_file 返回的 sha256，新文件省略"}"#,
     ),
     host(
+        "nginx.site_save",
+        "创建/修改面板管理的 nginx 站点",
+        r#"{"spec": "get_nginx_site（MCP 为 nginx_get_site）返回的 spec（name, domains, kind: proxy|static, proxy, static, listen, features, ssl, extra）", "base_sha256": "get_nginx_site 返回的 sha256，新站点省略", "overwrite": false}"#,
+    ),
+    host(
+        "nginx.site_delete",
+        "删除面板管理的 nginx 站点",
+        r#"{"name": "站点名", "purge_certs": false}"#,
+    ),
+    host(
+        "nginx.cert_issue",
+        "为站点申请/续期证书（ACME）",
+        r#"{"name": "站点名", "force": false}"#,
+    ),
+    // private keys never pass through an agent
+    ActionDef {
+        agent: false,
+        ..host(
+            "nginx.cert_upload",
+            "为站点上传证书",
+            r#"{"name": "站点名", "cert_pem": "证书 PEM", "key_pem": "私钥 PEM"}"#,
+        )
+    },
+    host(
         "firewall.add",
         "添加防火墙规则",
         r#"{"action": "allow|deny|reject|limit", "port": "443 或 8000-8100", "proto": "tcp|udp|any", "from": "来源地址或 CIDR，可省略"}"#,
@@ -412,6 +436,17 @@ pub fn validate(def: &ActionDef, args: &Value) -> Result<String> {
             {
                 return Err(invalid(
                     "content 含有脱敏占位符（如 <redacted>），请只改需要的行并保留原值，或请管理员在面板上修改",
+                ));
+            }
+            crate::ops::calls::summary(def.name, args)
+        }
+        "nginx.site_save" => {
+            if args["spec"]["extra"]
+                .as_str()
+                .is_some_and(crate::ops::has_placeholder)
+            {
+                return Err(invalid(
+                    "spec.extra 含有脱敏占位符（如 <redacted>），请保留原值，或请管理员在面板上修改",
                 ));
             }
             crate::ops::calls::summary(def.name, args)

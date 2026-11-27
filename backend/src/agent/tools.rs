@@ -211,6 +211,13 @@ pub fn definitions() -> Vec<Value> {
             }, "required": ["path"], "additionalProperties": false }
         }),
         json!({
+            "name": "get_nginx_site",
+            "description": "读取一个由面板管理的 nginx 站点（nginx_sites 中 managed = true）的设置：spec（域名、反向代理或静态目录、功能开关、SSL 方式）、证书状态、是否被手动改过，以及 sha256（修改站点时作为 base_sha256）。",
+            "input_schema": { "type": "object", "properties": {
+                "name": { "type": "string" }
+            }, "required": ["name"], "additionalProperties": false }
+        }),
+        json!({
             "name": "list_workspace",
             "description": "列出隔离工作区中的文件。",
             "input_schema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -573,6 +580,21 @@ pub async fn execute(ctx: &ToolCtx<'_>, name: &str, input: &Value) -> Result<Val
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             if let Some(c) = v["data"]["content"].as_str() {
                 v["data"]["content"] = crate::ops::redact_config(c).into();
+            }
+            v
+        }
+        "get_nginx_site" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                name: String,
+            }
+            let a: A = parse(input)?;
+            let mut v = crate::ops::read(state, "nginx.site_get", json!({ "name": a.name }))
+                .await
+                .map_err(|e| anyhow::anyhow!(e.message))?;
+            if let Some(c) = v["data"]["spec"]["extra"].as_str() {
+                v["data"]["spec"]["extra"] = crate::ops::redact_config(c).into();
             }
             v
         }

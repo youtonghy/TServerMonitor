@@ -227,6 +227,67 @@ pub fn read_config(root: &Path) -> Vec<(String, String)> {
     files
 }
 
+/// Certificates of managed sites (from the helper's `nginx.sites`): expiring soon, expired,
+/// or a failed automatic renewal. Category `cert`.
+pub fn certs(sites: &[crate::ops::nginx::Site], now_ms: i64) -> Vec<Check> {
+    use crate::ops::nginx_site::SslMode;
+    let mut out = Vec::new();
+    for s in sites.iter().filter(|s| s.enabled) {
+        let Some(c) = &s.cert else { continue };
+        if c.mode == SslMode::None {
+            continue;
+        }
+        let auto = c.mode == SslMode::Acme;
+        if let Some(na) = c.not_after {
+            let days = (na - now_ms).div_euclid(86_400_000);
+            let date = chrono::DateTime::from_timestamp_millis(na)
+                .map(|t| t.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            let (sev, title) = if days < 0 {
+                ("critical", format!("站点 {} 的证书已过期", s.name))
+            } else if days < 7 {
+                (
+                    "high",
+                    format!("站点 {} 的证书将在 {days} 天后过期", s.name),
+                )
+            } else if days < if auto { 20 } else { 21 } {
+                (
+                    "medium",
+                    format!("站点 {} 的证书将在 {days} 天后过期", s.name),
+                )
+            } else {
+                ("", String::new())
+            };
+            if !sev.is_empty() {
+                let detail = if auto {
+                    "自动续期没有及时完成。请在 nginx 页面查看最近一次申请的错误，确认域名仍解析到本机且 80 端口可访问，然后手动点“申请证书”。"
+                } else {
+                    "请在到期前上传新证书，或改为自动申请。"
+                };
+                out.push(check(
+                    &format!("expiry:{}", s.name),
+                    "cert",
+                    sev,
+                    &title,
+                    detail,
+                    format!("{} 到期：{date}", s.server_names.join(" ")),
+                ));
+            }
+        }
+        if auto && let Some(err) = &c.last_error {
+            out.push(check(
+                &format!("renew-failed:{}", s.name),
+                "cert",
+                "medium",
+                &format!("站点 {} 的证书申请失败", s.name),
+                "最近一次自动申请或续期没有成功；助手会在 6 小时后重试。",
+                err.chars().take(500).collect(),
+            ));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +335,49 @@ mod tests {
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].severity, "medium");
         assert!(c[0].title.contains("/report"));
+    }
+
+    #[test]
+    fn certificate_findings() {
+        use crate::ops::nginx::{Layout, Site};
+        use crate::ops::nginx_site::{CertInfo, SslMode};
+        let now = 1_000 * 86_400_000;
+        let site = |name: &str, mode, days: Option<i64>, err: Option<&str>| Site {
+            name: name.into(),
+            file: format!("conf.d/{name}.conf"),
+            enabled: true,
+            layout: Layout::ConfD,
+            server_names: vec![format!("{name}.example.com")],
+            listen: vec![],
+            ssl: true,
+            managed: true,
+            kind: None,
+            drifted: false,
+            cert: Some(CertInfo {
+                mode,
+                not_after: days.map(|d| now + d * 86_400_000),
+                last_error: err.map(str::to_string),
+                ..Default::default()
+            }),
+        };
+        let c = certs(
+            &[
+                site("ok", SslMode::Acme, Some(60), None),
+                site("soon", SslMode::Upload, Some(10), None),
+                site("gone", SslMode::Acme, Some(-1), Some("timeout")),
+                site("new", SslMode::Acme, None, Some("dns")),
+            ],
+            now,
+        );
+        let keys: Vec<(&str, &str)> = c.iter().map(|c| (c.key.as_str(), c.severity)).collect();
+        assert_eq!(
+            keys,
+            [
+                ("cert:expiry:soon", "medium"),
+                ("cert:expiry:gone", "critical"),
+                ("cert:renew-failed:gone", "medium"),
+                ("cert:renew-failed:new", "medium"),
+            ]
+        );
     }
 }

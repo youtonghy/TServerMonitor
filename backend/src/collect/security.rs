@@ -591,6 +591,18 @@ pub fn spawn(state: &Shared) {
                     )
                     .await;
                 }
+                // certificates of managed sites (only the helper can see them)
+                if let Ok(v) = crate::ops::read(&state, "nginx.sites", serde_json::json!({})).await
+                {
+                    let sites: Vec<crate::ops::nginx::Site> =
+                        serde_json::from_value(v["data"]["sites"].clone()).unwrap_or_default();
+                    apply(
+                        &state,
+                        "cert",
+                        &crate::collect::nginx_lint::certs(&sites, now_ms()),
+                    )
+                    .await;
+                }
                 if state
                     .cfg
                     .logs

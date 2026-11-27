@@ -358,6 +358,27 @@ impl McpServer {
     }
 
     #[tool(
+        description = "Settings of a managed nginx site (created from the dashboard form): spec, file, enabled, sha256 (pass as base_sha256 to nginx_save_site), drifted (edited by hand) and certificate state.",
+        annotations(read_only_hint = true)
+    )]
+    async fn nginx_get_site(
+        &self,
+        Parameters(a): Parameters<SiteNameArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut v = crate::ops::read(
+            &self.state,
+            "nginx.site_get",
+            serde_json::json!({ "name": a.name }),
+        )
+        .await
+        .map_err(op_err)?;
+        if let Some(c) = v["data"]["spec"]["extra"].as_str() {
+            v["data"]["spec"]["extra"] = crate::ops::redact_config(c).into();
+        }
+        json_result(&v)
+    }
+
+    #[tool(
         description = "Firewall status: backend (ufw, firewalld, nftables, iptables), active, default policy, rules with their delete spec, SSH ports and caveats.",
         annotations(read_only_hint = true)
     )]
@@ -864,6 +885,58 @@ pub struct SiteToggleArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct SiteNameArgs {
+    /// managed site name, as listed by nginx_list_sites (managed = true)
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SiteSaveArgs {
+    /// Site description, same shape as `spec` from nginx_get_site: { name, domains[],
+    /// kind: proxy|static, proxy: { upstream, websocket, pass_host, timeout_secs },
+    /// static: { root, index, spa }, listen: { http, https, ipv6 }, features: { force_https,
+    /// http2, hsts, gzip, static_cache, access_log, client_max_body_mb }, ssl: { mode:
+    /// none|acme|upload|path, cert_path, key_path }, extra }. Omitted fields take defaults.
+    pub spec: serde_json::Value,
+    /// sha256 from nginx_get_site; omit only to create a new site
+    pub base_sha256: Option<String>,
+    /// replace a managed config that was edited by hand
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default = "yes")]
+    pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SiteDeleteArgs {
+    pub name: String,
+    /// also delete the uploaded / issued certificate
+    #[serde(default)]
+    pub purge_certs: bool,
+    #[serde(default = "yes")]
+    pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CertIssueArgs {
+    pub name: String,
+    /// issue even if the current certificate is not due for renewal
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default = "yes")]
+    pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct WriteFileArgs {
     /// path relative to the nginx root, inside an editable directory
     pub path: String,
@@ -1315,6 +1388,87 @@ impl McpServer {
     }
 
     #[tool(
+        description = "Create or change a managed nginx site (reverse proxy or static files) from a structured spec; the helper renders the config from its template. The dry run (default) returns a unified diff. On apply: test, reload, probe, and everything is restored on failure. Static roots must lie under the host's allowed site roots; `extra` needs the edit permission; never send redacted placeholders.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn nginx_save_site(
+        &self,
+        ext: rmcp::model::Extensions,
+        Parameters(a): Parameters<SiteSaveArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if a.spec["extra"]
+            .as_str()
+            .is_some_and(crate::ops::has_placeholder)
+        {
+            return Err(ErrorData::invalid_params(
+                "spec.extra contains a redaction placeholder (e.g. <redacted>); keep the original values or ask the operator to change them in the dashboard",
+                None,
+            ));
+        }
+        self.write(
+            &ext,
+            "nginx.site_save",
+            serde_json::json!({ "spec": a.spec, "base_sha256": a.base_sha256, "overwrite": a.overwrite }),
+            a.dry_run,
+            a.reason,
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Delete a managed nginx site (config, link and stored settings), then test and reload; restored on failure. Manual sites are refused. Dry run unless dry_run=false.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn nginx_delete_site(
+        &self,
+        ext: rmcp::model::Extensions,
+        Parameters(a): Parameters<SiteDeleteArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.write(
+            &ext,
+            "nginx.site_delete",
+            serde_json::json!({ "name": a.name, "purge_certs": a.purge_certs }),
+            a.dry_run,
+            a.reason,
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Issue (or renew) a certificate for a managed site whose SSL mode is acme, using ACME HTTP-01, then switch the site to HTTPS. Runs a local self-check first; can take a few minutes (poll the job). Skipped when the certificate is not due unless force=true. Dry run unless dry_run=false.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn nginx_issue_certificate(
+        &self,
+        ext: rmcp::model::Extensions,
+        Parameters(a): Parameters<CertIssueArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.write(
+            &ext,
+            "nginx.cert_issue",
+            serde_json::json!({ "name": a.name, "force": a.force }),
+            a.dry_run,
+            a.reason,
+        )
+        .await
+    }
+
+    #[tool(
         description = "Add a firewall rule (ufw/firewalld; nftables: deny/reject only). Blocking SSH for every source is refused. Applied provisionally: it reverts unless a person confirms it in the dashboard. Dry run unless dry_run=false.",
         annotations(
             read_only_hint = false,
@@ -1521,4 +1675,4 @@ impl ServerHandler for McpServer {
 }
 
 const INSTRUCTIONS: &str = "Operations view of one server. Diagnostics: system status, log analysis, real-time access analysis, host metrics, containers, ports, databases, alerts, findings, reports and the built-in AI agent's conversations. Inventory: Docker (containers, compose projects, images, volumes, networks), nginx sites and config files, firewall rules, sshd effective config, authorized keys and login sessions (secrets redacted); scheduled tasks, prompts, notification channels, package jobs and the ops audit log. \
-When connected to /mcp/ops, you can also ask for changes. Server write tools are a dry run unless dry_run=false: call once with the default to see the plan or diff. A real change (dry_run=false, or request_change for anything in list_change_actions) needs a `reason` (the problem, your evidence, the expected effect) and becomes a change request: unless the operator lets that action run automatically, a person approves or rejects it in the dashboard, so the call returns status=pending; poll get_change_request with wait_secs. Do not report a change as done until its status is executed. Changes run through a root helper that only permits what the host operator enabled. Firewall and sshd changes are additionally applied provisionally and reverted unless a person confirms them; you may call revert_change but cannot confirm. Before changing a file, read it with nginx_get_file and pass its sha256 as base_sha256; never write back redacted placeholders such as <redacted>.";
+When connected to /mcp/ops, you can also ask for changes. Server write tools are a dry run unless dry_run=false: call once with the default to see the plan or diff. A real change (dry_run=false, or request_change for anything in list_change_actions) needs a `reason` (the problem, your evidence, the expected effect) and becomes a change request: unless the operator lets that action run automatically, a person approves or rejects it in the dashboard, so the call returns status=pending; poll get_change_request with wait_secs. Do not report a change as done until its status is executed. Changes run through a root helper that only permits what the host operator enabled. Firewall and sshd changes are additionally applied provisionally and reverted unless a person confirms them; you may call revert_change but cannot confirm. Before changing a file, read it with nginx_get_file and pass its sha256 as base_sha256; never write back redacted placeholders such as <redacted>. Sites marked managed in nginx_list_sites are generated from a form: change them with nginx_get_site and nginx_save_site instead of editing their file; certificate uploads are only possible in the dashboard.";

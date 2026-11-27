@@ -12,12 +12,15 @@
 //!
 //! Protocol: see [`crate::ops::proto`].
 
+pub mod acme;
 pub mod config;
 pub mod docker;
 pub mod exec;
 pub mod firewall;
 pub mod fsutil;
 pub mod nginx;
+pub mod nginx_cert;
+pub mod nginx_site;
 pub mod pending;
 pub mod ssh;
 
@@ -61,6 +64,11 @@ pub struct Ctx {
     pub cfg: Arc<HelperConfig>,
     pub pending: Arc<pending::Pending>,
     locks: [Arc<Mutex<()>>; 4],
+    /// nginx version, detected on first use.
+    pub nginx_version: tokio::sync::OnceCell<Option<(u32, u32, u32)>>,
+    pub acme: Arc<dyn acme::Issuer>,
+    /// Sites with a certificate order in flight (orders run without the nginx lock).
+    pub issuing: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 pub struct Call<'a> {
@@ -91,11 +99,22 @@ pub enum Domain {
 
 impl Ctx {
     pub fn new(cfg: HelperConfig) -> Result<Arc<Self>> {
+        let issuer = Arc::new(acme::AcmeClient::new(
+            cfg.nginx.acme.clone(),
+            &cfg.state_dir,
+        ));
+        Self::with_issuer(cfg, issuer)
+    }
+
+    pub fn with_issuer(cfg: HelperConfig, acme: Arc<dyn acme::Issuer>) -> Result<Arc<Self>> {
         let pending = pending::Pending::new(&cfg.state_dir, Duration::from_secs(cfg.confirm_secs))?;
         Ok(Arc::new(Self {
             cfg: Arc::new(cfg),
             pending,
             locks: std::array::from_fn(|_| Arc::new(Mutex::new(()))),
+            nginx_version: tokio::sync::OnceCell::new(),
+            acme,
+            issuing: Default::default(),
         }))
     }
 
@@ -139,7 +158,18 @@ async fn hello(ctx: &Ctx) -> Value {
         "confirm_secs": c.confirm_secs,
         "domains": {
             "docker": { "enabled": c.docker.enabled, "allow": c.docker.allow },
-            "nginx": { "enabled": c.nginx.enabled, "allow": c.nginx.allow },
+            "nginx": {
+                "enabled": c.nginx.enabled,
+                "allow": c.nginx.allow,
+                "site_roots": c.nginx.site_roots,
+                "cert_paths": c.nginx.cert_paths,
+                "acme": {
+                    "enabled": c.nginx.acme.enabled,
+                    "staging": c.nginx.acme.directory.is_none() && c.nginx.acme.staging,
+                    "custom_directory": c.nginx.acme.directory.is_some(),
+                    "renew_days": c.nginx.acme.renew_days,
+                },
+            },
             "firewall": {
                 "enabled": c.firewall.enabled,
                 "allow": c.firewall.allow,
@@ -217,6 +247,12 @@ pub async fn serve(cfg: HelperConfig) -> Result<()> {
     }
     let ctx = Ctx::new(cfg)?;
     ctx.pending.recover().await;
+    if ctx.cfg.nginx.enabled
+        && ctx.cfg.nginx.acme.enabled
+        && ctx.cfg.nginx.allow.contains(&config::NginxOp::Cert)
+    {
+        tokio::spawn(nginx_cert::renew_loop(ctx.clone()));
+    }
     tracing::info!(
         "ops helper on {} (docker={} nginx={} firewall={} ssh={}{})",
         socket.display(),
@@ -382,6 +418,7 @@ pub fn is_query(call: &str) -> bool {
             | "nginx.sites"
             | "nginx.files"
             | "nginx.file"
+            | "nginx.site_get"
             | "firewall.status"
             | "ssh.config"
             | "ssh.keys"

@@ -38,15 +38,38 @@ protected = []
 
 [nginx]
 enabled = false
-# test | reload | site | edit
+# test | reload | site | edit | manage | cert
 # `edit` is ROOT-EQUIVALENT: nginx loads its config as root. Obvious escapes (load_module,
 # user, perl/js/lua, log paths outside /var/log, ...) are refused, but treat it as root access.
+# `manage` creates, changes and deletes sites generated from the dashboard form (reverse
+# proxy or static files) from a fixed template; custom directives in a managed site also
+# need `edit`. `cert` uploads certificates and issues them through ACME (see [nginx.acme]).
+# A typical one-click setup: allow = ["test", "reload", "site", "manage", "cert"]
 allow = []
 root = "/etc/nginx"
 edit_dirs = ["conf.d", "sites-available", "snippets"]
 binary = "nginx"
 # Fetched after every reload; a 5xx, timeout or connection error rolls the change back.
 # probe_url = "http://127.0.0.1/"
+# Document roots of managed static sites must lie below one of these (a missing site
+# directory is created; the helper unit must be allowed to write there).
+site_roots = ["/var/www"]
+# Existing certificates (e.g. from certbot) may be referenced from these directories.
+cert_paths = ["/etc/letsencrypt", "/etc/ssl"]
+
+[nginx.acme]
+# Issue and renew certificates automatically (ACME HTTP-01, Let's Encrypt by default). The
+# site must listen on port 80 and its domains must resolve to this server. Certificates go to
+# /etc/nginx/tsmonitor/certs/<site>/ and are renewed when fewer than renew_days are left.
+enabled = false
+# Let's Encrypt staging: untrusted test certificates with generous rate limits.
+staging = false
+# Contact address for the ACME account (optional).
+# email = "ops@example.com"
+renew_days = 30
+# Another ACME directory (private CA) and its root certificate:
+# directory = "https://ca.internal/acme/acme/directory"
+# ca_file = "/etc/tsmonitor/acme-root.pem"
 
 [firewall]
 enabled = false

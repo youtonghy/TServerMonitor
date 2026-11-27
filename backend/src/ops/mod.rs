@@ -12,6 +12,7 @@ pub mod client;
 pub mod docker;
 pub mod firewall;
 pub mod nginx;
+pub mod nginx_site;
 pub mod proto;
 pub mod ssh;
 pub mod validate;
@@ -166,6 +167,7 @@ pub const READ_CALLS: &[&str] = &[
     "nginx.sites",
     "nginx.files",
     "nginx.file",
+    "nginx.site_get",
     "firewall.status",
     "ssh.config",
     "ssh.keys",
@@ -244,6 +246,7 @@ async fn local_read(state: &Shared, call: &str, args: &Value) -> OpResult<Value>
                 "options": ssh::OPTIONS.iter().map(|(k, v)| json!({ "key": k, "values": v })).collect::<Vec<_>>(),
             }))
         }
+        "nginx.site_get" => Err(need_helper("查看站点设置")),
         "ssh.keys" => Err(need_helper("查看各用户的 authorized_keys ")),
         "firewall.status" => Err(need_helper("查看防火墙规则")),
         c if c.starts_with("docker.") => {
@@ -417,6 +420,17 @@ pub fn redact_args(args: &Value) -> Value {
                 "sha256": crate::helper::fsutil::sha256_hex(c.as_bytes()),
             });
             o.insert("content".into(), summary);
+        }
+        // certificate uploads: keep a fingerprint of the chain, nothing of the key
+        if let Some(c) = o.get("cert_pem").and_then(Value::as_str) {
+            let summary = json!({
+                "bytes": c.len(),
+                "sha256": crate::helper::fsutil::sha256_hex(c.as_bytes()),
+            });
+            o.insert("cert_pem".into(), summary);
+        }
+        if o.contains_key("key_pem") {
+            o.insert("key_pem".into(), json!("<redacted>"));
         }
         if let Some(k) = o.get("key").and_then(Value::as_str) {
             let fp = ssh::check_new_key(k)
@@ -719,5 +733,10 @@ mod tests {
         let v = redact_args(&json!({ "path": "conf.d/a.conf", "content": "secret stuff" }));
         assert_eq!(v["content"]["bytes"], 12);
         assert!(v.to_string().find("secret stuff").is_none());
+        let v = redact_args(
+            &json!({ "name": "a", "cert_pem": "CERT", "key_pem": "-----BEGIN PRIVATE KEY-----x" }),
+        );
+        assert!(!v.to_string().contains("PRIVATE") && !v.to_string().contains("CERT\""));
+        assert_eq!(v["cert_pem"]["bytes"], 4);
     }
 }

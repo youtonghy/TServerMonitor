@@ -8,6 +8,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
+use super::nginx_site::{self, CertInfo, SiteKind};
 use super::proto::{OpError, OpResult};
 use super::validate;
 
@@ -33,6 +34,17 @@ pub struct Site {
     pub server_names: Vec<String>,
     pub listen: Vec<String>,
     pub ssl: bool,
+    /// Generated from a [`SiteSpec`](super::nginx_site::SiteSpec) by the helper.
+    #[serde(default)]
+    pub managed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SiteKind>,
+    /// A managed file that was edited by hand since it was generated.
+    #[serde(default)]
+    pub drifted: bool,
+    /// Certificate state of a managed site (filled in by the helper).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<CertInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +120,25 @@ fn read_capped(p: &Path) -> Option<String> {
     std::fs::read_to_string(p).ok()
 }
 
+fn site(name: String, file: String, enabled: bool, layout: Layout, text: &str) -> Site {
+    let (server_names, listen, ssl) = site_info(text);
+    // only a marker naming this very file counts; a copied managed file is a manual site
+    let marker = nginx_site::parse_marker(text).filter(|m| m.name == name);
+    Site {
+        name,
+        file,
+        enabled,
+        layout,
+        server_names,
+        listen,
+        ssl,
+        managed: marker.is_some(),
+        kind: marker.as_ref().and_then(|m| m.kind),
+        drifted: marker.is_some_and(|m| m.drifted),
+        cert: None,
+    }
+}
+
 pub fn sites(root: &Path) -> Vec<Site> {
     let mut out = Vec::new();
     let avail = root.join("sites-available");
@@ -131,16 +162,13 @@ pub fn sites(root: &Path) -> Vec<Site> {
                 };
                 t.file_name() == path.file_name()
             }) || std::fs::symlink_metadata(&link).is_ok_and(|m| m.is_file());
-            let (server_names, listen, ssl) = site_info(&text);
-            out.push(Site {
-                file: format!("sites-available/{name}"),
-                name,
+            out.push(site(
+                name.clone(),
+                format!("sites-available/{name}"),
                 enabled,
-                layout: Layout::SitesEnabled,
-                server_names,
-                listen,
-                ssl,
-            });
+                Layout::SitesEnabled,
+                &text,
+            ));
         }
     }
     let confd = root.join("conf.d");
@@ -159,20 +187,18 @@ pub fn sites(root: &Path) -> Vec<Site> {
         let Some(text) = read_capped(&e.path()) else {
             continue;
         };
-        let (server_names, listen, ssl) = site_info(&text);
+        let s = site(
+            name,
+            format!("conf.d/{fname}"),
+            enabled,
+            Layout::ConfD,
+            &text,
+        );
         // conf.d also holds global snippets; only files with a server block are sites
-        if listen.is_empty() && server_names.is_empty() {
+        if s.listen.is_empty() && s.server_names.is_empty() {
             continue;
         }
-        out.push(Site {
-            file: format!("conf.d/{fname}"),
-            name,
-            enabled,
-            layout: Layout::ConfD,
-            server_names,
-            listen,
-            ssl,
-        });
+        out.push(s);
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -195,7 +221,7 @@ pub fn files(root: &Path, edit_dirs: &[String]) -> Vec<FileEntry> {
                 size: m.len(),
                 editable: false,
             });
-        } else if m.is_dir() && name != "sites-enabled" {
+        } else if m.is_dir() && name != "sites-enabled" && name != nginx_site::OWN_DIR {
             let editable = edit_dirs.iter().any(|d| d == &name);
             for f in std::fs::read_dir(e.path()).into_iter().flatten().flatten() {
                 let fname = f.file_name().to_string_lossy().into_owned();
@@ -225,7 +251,7 @@ pub fn check_path(rel: &str, edit_dirs: &[String], write: bool) -> OpResult<Vec<
     if parts.len() > 2 {
         return Err(OpError::invalid("只能访问 nginx 根目录下两层以内的文件"));
     }
-    if parts.iter().any(|p| secret_name(p)) {
+    if parts.iter().any(|p| secret_name(p)) || parts[0] == nginx_site::OWN_DIR {
         return Err(OpError::invalid("证书、私钥与密码文件不允许通过面板访问"));
     }
     if write {

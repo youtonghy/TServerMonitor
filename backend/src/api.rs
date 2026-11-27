@@ -2375,6 +2375,9 @@ mod tests {
         for w in [
             "docker_container_action",
             "nginx_write_file",
+            "nginx_save_site",
+            "nginx_delete_site",
+            "nginx_issue_certificate",
             "firewall_rule_add",
             "ssh_set_options",
             "revert_change",
@@ -2385,9 +2388,12 @@ mod tests {
         assert_eq!(status, 403);
         let (_, ops_tools) = mcp_tools(&c, &format!("{}/mcp/ops", a.base), Some(&ops)).await;
         assert!(
-            ops_tools.contains(&"nginx_write_file".to_string()),
+            ops_tools.contains(&"nginx_write_file".to_string())
+                && ops_tools.contains(&"nginx_save_site".to_string()),
             "{ops_tools:?}"
         );
+        assert!(read_tools.contains(&"nginx_get_site".to_string()));
+        assert!(!ops_tools.iter().any(|n| n.contains("upload")));
         assert!(!ops_tools.iter().any(|n| n.contains("confirm")));
 
         // revoked tokens stop working

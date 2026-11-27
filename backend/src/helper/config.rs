@@ -101,6 +101,59 @@ pub enum NginxOp {
     Site,
     /// Write configuration files. ROOT-EQUIVALENT: nginx runs as root while loading config.
     Edit,
+    /// Create, change and delete managed sites generated from a form (reverse proxy or
+    /// static files). Constrained to the built-in template: static roots must lie under
+    /// `site_roots`, and custom directives additionally need `edit`.
+    Manage,
+    /// Upload certificates and issue / renew them through ACME for managed sites.
+    Cert,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AcmeConfig {
+    /// Built-in ACME client (HTTP-01). Off by default.
+    pub enabled: bool,
+    /// Let's Encrypt staging (untrusted test certificates, generous rate limits).
+    pub staging: bool,
+    /// Another ACME directory (e.g. a private CA); overrides `staging`.
+    pub directory: Option<String>,
+    /// Root certificate (PEM) of a private ACME directory, for CAs that are not publicly
+    /// trusted (step-ca, Pebble).
+    pub ca_file: Option<PathBuf>,
+    /// Account contact address (optional).
+    pub email: Option<String>,
+    /// Renew when fewer than this many days are left.
+    pub renew_days: u32,
+    /// Base URL for the local self-check before an order (default `http://127.0.0.1:<port>`).
+    pub preflight_url: Option<String>,
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            staging: false,
+            directory: None,
+            ca_file: None,
+            email: None,
+            renew_days: 30,
+            preflight_url: None,
+        }
+    }
+}
+
+impl AcmeConfig {
+    pub const LETSENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
+    pub const LETSENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+    pub fn directory_url(&self) -> &str {
+        match &self.directory {
+            Some(d) => d,
+            None if self.staging => Self::LETSENCRYPT_STAGING,
+            None => Self::LETSENCRYPT,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,6 +167,11 @@ pub struct NginxDomain {
     pub binary: String,
     /// Fetched after every reload; a 5xx, timeout or connection error rolls the change back.
     pub probe_url: Option<String>,
+    /// Allowed document roots of managed static sites; missing site directories are created.
+    pub site_roots: Vec<String>,
+    /// Where existing certificates may be referenced from (`path` SSL mode).
+    pub cert_paths: Vec<String>,
+    pub acme: AcmeConfig,
 }
 
 impl Default for NginxDomain {
@@ -125,6 +183,9 @@ impl Default for NginxDomain {
             edit_dirs: vec!["conf.d".into(), "sites-available".into(), "snippets".into()],
             binary: "nginx".into(),
             probe_url: None,
+            site_roots: vec!["/var/www".into()],
+            cert_paths: vec!["/etc/letsencrypt".into(), "/etc/ssl".into()],
+            acme: AcmeConfig::default(),
         }
     }
 }
@@ -207,6 +268,35 @@ impl HelperConfig {
         for d in &self.nginx.edit_dirs {
             crate::ops::validate::file_name(d)
                 .map_err(|e| anyhow::anyhow!("nginx.edit_dirs: {e}"))?;
+            if d == crate::ops::nginx_site::OWN_DIR {
+                bail!("nginx.edit_dirs must not contain the helper's own directory {d:?}");
+            }
+        }
+        for (what, list) in [
+            ("site_roots", &self.nginx.site_roots),
+            ("cert_paths", &self.nginx.cert_paths),
+        ] {
+            for p in list {
+                let n = crate::ops::nginx_site::abs_path(what, p)
+                    .map_err(|e| anyhow::anyhow!("nginx.{what}: {e}"))?;
+                if n.matches('/').count() < 2 && what == "site_roots" {
+                    bail!("nginx.site_roots entries must be at least two levels deep: {p:?}");
+                }
+            }
+        }
+        if let Some(d) = &self.nginx.acme.directory {
+            let p = url::Url::parse(d).context("nginx.acme.directory")?;
+            if p.scheme() != "https" {
+                bail!("nginx.acme.directory must be https");
+            }
+        }
+        if let Some(e) = &self.nginx.acme.email
+            && (e.contains(char::is_whitespace) || !e.contains('@'))
+        {
+            bail!("nginx.acme.email is not an e-mail address");
+        }
+        if !(1..=60).contains(&self.nginx.acme.renew_days) {
+            bail!("nginx.acme.renew_days must be between 1 and 60");
         }
         if let Some(z) = &self.firewall.zone {
             crate::ops::validate::simple_name("zone", z)

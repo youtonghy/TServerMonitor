@@ -14,7 +14,7 @@ use crate::ops::nginx as inv;
 use crate::ops::proto::{ErrorCode, OpError, OpResult};
 use crate::ops::validate;
 
-fn allow(ctx: &Ctx, op: NginxOp) -> OpResult<()> {
+pub(super) fn allow(ctx: &Ctx, op: NginxOp) -> OpResult<()> {
     if ctx.cfg.nginx.allow.contains(&op) {
         Ok(())
     } else {
@@ -52,7 +52,29 @@ pub async fn handle(ctx: &Ctx, op: &str, call: Call<'_>) -> OpResult<Value> {
     }
     let root = n.root.clone();
     match op {
-        "sites" => Ok(json!({ "layout": inv::layout(&root), "sites": inv::sites(&root) })),
+        "sites" => {
+            let mut sites = inv::sites(&root);
+            super::nginx_site::annotate(ctx, &root, &mut sites);
+            Ok(json!({ "layout": inv::layout(&root), "sites": sites }))
+        }
+        "site_get" => super::nginx_site::get(ctx, &root, call.args()?),
+        "site_save" => {
+            let a = call.args()?;
+            let _g = ctx.lock(Domain::Nginx).await?;
+            super::nginx_site::save(ctx, &root, a, &call).await
+        }
+        "site_delete" => {
+            let a = call.args()?;
+            let _g = ctx.lock(Domain::Nginx).await?;
+            super::nginx_site::delete(ctx, &root, a, &call).await
+        }
+        // takes the nginx lock itself, only for installing the result
+        "cert_issue" => super::nginx_cert::issue(ctx, &root, call.args()?, &call).await,
+        "cert_upload" => {
+            let a = call.args()?;
+            let _g = ctx.lock(Domain::Nginx).await?;
+            super::nginx_cert::upload(ctx, &root, a, &call).await
+        }
         "files" => Ok(json!(inv::files(&root, &n.edit_dirs))),
         "file" => {
             let a: PathArgs = call.args()?;
@@ -146,7 +168,7 @@ async fn probe(ctx: &Ctx, log: &Log) -> OpResult<()> {
 
 /// Runs after files changed: test, reload, probe. On any failure restores `backups` and, if the
 /// reload already happened, reloads the restored config.
-async fn apply_or_rollback(ctx: &Ctx, backups: &[Backup], log: &Log) -> OpResult<()> {
+pub(super) async fn apply_or_rollback(ctx: &Ctx, backups: &[Backup], log: &Log) -> OpResult<()> {
     let rollback = |why: String, reloaded: bool| async move {
         log.line(format!("回滚：{why}"));
         for b in backups.iter().rev() {
@@ -255,10 +277,7 @@ async fn site(
                 return Ok(json!({ "dry_run": true }));
             }
             let b_from = fsutil::backup(state, "nginx", &from)?;
-            let b_to = Backup {
-                path: to.clone(),
-                saved: None,
-            };
+            let b_to = Backup::absent(&to);
             std::fs::rename(&from, &to)
                 .map_err(|e| OpError::failed(format!("{action}失败：{e}")))?;
             apply_or_rollback(ctx, &[b_from, b_to], call.log).await?;
@@ -327,19 +346,20 @@ async fn write(ctx: &Ctx, root: &Path, a: WriteArgs, call: &Call<'_>) -> OpResul
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::helper::Ctx;
     use crate::ops::proto::Actor;
 
-    /// A fake `nginx` binary: `-t` fails when any conf contains BROKEN.
+    /// A fake `nginx` binary: `-t` fails when an active conf (`*.conf`, or anything linked
+    /// from `sites-enabled`) contains BROKEN.
     fn fake_nginx(dir: &Path, root: &Path) -> String {
         let bin = dir.join("fake-nginx");
         std::fs::write(
             &bin,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"-t\" ]; then\n  if grep -rq --include=*.conf BROKEN {} ; then echo 'nginx: [emerg] unexpected' >&2; exit 1; fi\n  echo 'test is successful' >&2; exit 0\nfi\nexit 0\n",
-                root.display()
+                "#!/bin/sh\nif [ \"$1\" = \"-t\" ]; then\n  if grep -rq --include=*.conf BROKEN {r} || cat {r}/sites-enabled/* 2>/dev/null | grep -q BROKEN ; then echo 'nginx: [emerg] unexpected' >&2; exit 1; fi\n  echo 'test is successful' >&2; exit 0\nfi\nexit 0\n",
+                r = root.display()
             ),
         )
         .unwrap();
@@ -349,16 +369,27 @@ mod tests {
     }
 
     fn ctx(dir: &Path, root: &Path) -> std::sync::Arc<Ctx> {
+        ctx_with(dir, root, |n| n.allow.push(NginxOp::Edit))
+    }
+
+    /// Context with the fake nginx and test / reload / site / edit allowed; `f` adjusts the
+    /// nginx domain further.
+    pub(crate) fn ctx_with(
+        dir: &Path,
+        root: &Path,
+        f: impl FnOnce(&mut crate::helper::config::NginxDomain),
+    ) -> std::sync::Arc<Ctx> {
         let mut cfg: crate::helper::HelperConfig = toml::from_str("allowed_uids = []").unwrap();
         cfg.state_dir = dir.join("state");
         cfg.nginx.enabled = true;
         cfg.nginx.root = root.to_path_buf();
-        cfg.nginx.allow = vec![NginxOp::Edit, NginxOp::Site, NginxOp::Reload, NginxOp::Test];
+        cfg.nginx.allow = vec![NginxOp::Site, NginxOp::Reload, NginxOp::Test];
         cfg.nginx.binary = fake_nginx(dir, root);
+        f(&mut cfg.nginx);
         Ctx::new(cfg).unwrap()
     }
 
-    async fn call(ctx: &Ctx, op: &str, args: Value, dry_run: bool) -> OpResult<Value> {
+    pub(crate) async fn call(ctx: &Ctx, op: &str, args: Value, dry_run: bool) -> OpResult<Value> {
         let log = Log::sink(op);
         let actor = Actor::default();
         handle(

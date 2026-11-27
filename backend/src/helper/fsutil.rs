@@ -47,11 +47,37 @@ pub fn confined(root: &Path, rel: &[String]) -> OpResult<PathBuf> {
     Ok(p)
 }
 
-/// A file's state before a change. `saved = None` means the file did not exist.
+/// A file's state before a change. `saved = None` means the file did not exist; `link` is
+/// set instead when the path was a symlink (restored by re-creating the link).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Backup {
     pub path: PathBuf,
     pub saved: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<PathBuf>,
+}
+
+impl Backup {
+    /// "The path did not exist": restoring removes whatever is there.
+    pub fn absent(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            saved: None,
+            link: None,
+        }
+    }
+}
+
+/// Records a symlink (or its absence) at `path` before a change.
+pub fn backup_link(path: &Path) -> Result<Backup> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Ok(Backup {
+            link: Some(std::fs::read_link(path)?),
+            ..Backup::absent(path)
+        }),
+        Ok(_) => anyhow::bail!("{} is not a symlink", path.display()),
+        Err(_) => Ok(Backup::absent(path)),
+    }
 }
 
 fn sanitize(p: &Path) -> String {
@@ -89,8 +115,8 @@ pub fn backup(state_dir: &Path, domain: &str, path: &Path) -> Result<Backup> {
     };
     prune(&dir);
     Ok(Backup {
-        path: path.to_path_buf(),
         saved,
+        ..Backup::absent(path)
     })
 }
 
@@ -110,6 +136,15 @@ fn prune(dir: &Path) {
 
 /// Puts the file back exactly as it was (or removes it if it did not exist).
 pub fn restore(b: &Backup) -> Result<()> {
+    if let Some(target) = &b.link {
+        match std::fs::symlink_metadata(&b.path) {
+            Ok(m) if m.file_type().is_symlink() => std::fs::remove_file(&b.path)?,
+            Ok(_) => anyhow::bail!("{} is no longer a symlink", b.path.display()),
+            Err(_) => {}
+        }
+        return std::os::unix::fs::symlink(target, &b.path)
+            .with_context(|| format!("re-creating link {}", b.path.display()));
+    }
     match &b.saved {
         Some(saved) => {
             let data =
@@ -127,6 +162,15 @@ pub fn restore(b: &Backup) -> Result<()> {
 /// Writes through a temporary file in the same directory and renames it over `path`, keeping
 /// the existing file's mode and owner (new files get 0644).
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+    write_impl(path, data, None)
+}
+
+/// Like [`atomic_write`] but always sets `mode` (private keys, state files).
+pub fn atomic_write_mode(path: &Path, data: &[u8], mode: u32) -> Result<()> {
+    write_impl(path, data, Some(mode))
+}
+
+fn write_impl(path: &Path, data: &[u8], force_mode: Option<u32>) -> Result<()> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     let dir = path.parent().context("path has no parent")?;
     let old = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file());
@@ -145,7 +189,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
             .with_context(|| format!("creating {}", tmp.display()))?;
         f.write_all(data)?;
         f.sync_all()?;
-        let mode = old.as_ref().map_or(0o644, |m| m.mode() & 0o7777);
+        let mode = force_mode.unwrap_or_else(|| old.as_ref().map_or(0o644, |m| m.mode() & 0o7777));
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
         if let Some(m) = &old {
             // keep ownership; only possible (and needed) as root
@@ -181,6 +225,24 @@ mod tests {
         atomic_write(&new, b"x").unwrap();
         restore(&b).unwrap();
         assert!(!new.exists());
+
+        // symlinks are recorded and re-created
+        let link = d.path().join("enabled");
+        std::os::unix::fs::symlink(&f, &link).unwrap();
+        let b = backup_link(&link).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        restore(&b).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), f);
+        assert!(backup_link(&f).is_err());
+
+        // forced mode
+        use std::os::unix::fs::PermissionsExt;
+        let key = d.path().join("privkey.pem");
+        atomic_write_mode(&key, b"k", 0o600).unwrap();
+        assert_eq!(
+            std::fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
