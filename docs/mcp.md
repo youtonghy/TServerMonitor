@@ -46,7 +46,7 @@ name to `[server] mcp_allowed_hosts` (the MCP transport rejects unknown `Host` h
 ## How write tools behave
 
 1. **Dry run by default.** Every server write tool takes `dry_run` and defaults to `true`: the call
-   returns the plan (commands, or a unified diff for `nginx_write_file` and `ssh_set_options`)
+   returns the plan (commands, or a unified diff for `nginx_write_file`, `nginx_save_site` and `ssh_set_options`)
    without changing anything. Dry runs never need approval.
 2. **Real changes are change requests.** With `dry_run: false` (or `request_change { action, args,
    reason }` for any action from `list_change_actions`) the agent must pass a `reason`: the problem,
@@ -66,6 +66,9 @@ name to `[server] mcp_allowed_hosts` (the MCP transport rejects unknown `Host` h
 4. **Files.** Read with `nginx_get_file`, edit, and pass its `sha256` as `base_sha256`. Values shown
    as `<redacted>` are secrets: content that still contains a placeholder is refused, so change only
    lines you can reproduce exactly, or ask the operator.
+   Sites marked `managed` in `nginx_list_sites` were created from the dashboard form: read them
+   with `nginx_get_site`, change the `spec`, and save with `nginx_save_site` (pass its `sha256` as
+   `base_sha256`); `nginx_issue_certificate` issues or renews an ACME certificate for them.
 5. **Rollback.** nginx changes are tested (`nginx -t`), reloaded and probed; any failure restores the
    previous files byte for byte.
 6. **Confirm-or-revert.** Firewall and sshd changes, once approved, apply provisionally and return

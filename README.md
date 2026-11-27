@@ -196,12 +196,13 @@ hourly = "fast"
 | 领域 | 可以做的事 | 安全措施 |
 | --- | --- | --- |
 | Docker | 启动/停止/重启/强制终止/删除已有容器；按 compose 标签整体启停项目；拉取、删除、清理镜像；删除、清理卷 | 不提供 exec 与新建容器；套接字代理、TServerMonitor 自身和配置中列出的容器只能启动；删卷与清理卷是单独开关 |
-| nginx | 检查配置、重新加载、启用/停用站点、在 `conf.d` / `sites-available` / `snippets` 中编辑或新建文件 | 写入前备份并要求读取时的 sha256（防止覆盖他人修改）；随后执行 `nginx -t`、重新加载，并可探测 `probe_url`，任一步失败都逐字节恢复原文件 |
+| nginx | 检查配置、重新加载、启用/停用站点；用表单新建/修改/删除站点（反向代理或静态站点、多域名、HTTPS 跳转、HTTP/2、HSTS、gzip、缓存、WebSocket 等开关）；上传证书或自动申请 Let's Encrypt 证书并自动续期；在 `conf.d` / `sites-available` / `snippets` 中编辑或新建文件 | 写入前备份并要求读取时的 sha256（防止覆盖他人修改）；随后执行 `nginx -t`、重新加载，并可探测 `probe_url`，任一步失败都逐字节恢复原文件。表单站点按内置模板生成（`manage` 权限），静态目录限定在 `site_roots` 下，自定义指令另需 `edit`；私钥权限 0600，不进入任务记录，也不能经 MCP 上传 |
 | 防火墙 | ufw、firewalld 增删规则，ufw 启停；nftables 只能在独立的 `inet tsmonitor` 表中添加拒绝规则；iptables 只读 | 不能对所有来源封锁 SSH 端口、不能删除放行 SSH 的最后一条规则、未放行 SSH 时不能启用 ufw；每次修改都要在倒计时内确认，否则自动回滚 |
 | SSH | 通过 `sshd_config.d/00-tsmonitor.conf` 修改一组固定选项；为登录用户增删 `authorized_keys` 公钥；查看会话 | 执行 `sshd -t` 并用 `sshd -T` 核对生效值；拒绝关闭所有登录方式、在没有可用公钥时关闭密码登录；修改需确认否则回滚；公钥文件以 `O_NOFOLLOW` 打开并校验属主，防符号链接与硬链接攻击 |
 
 - **确认或回滚**：防火墙和 sshd 的修改会立即生效，页面顶部显示倒计时（默认 120 秒）。请在另一个终端**新建** SSH 连接确认能登录后再点“保留变更”，因为已建立的连接不受影响。不确认、助手崩溃或重启时都会自动回滚。外部 Agent 可以撤销但不能确认。
 - **演练模式**：助手配置 `dry_run = true` 时只记录将要执行的命令；单次请求也可以先演练（nginx 与 sshd 会返回 diff）。
+- **nginx 站点与证书**：在 `helper.toml` 的 `[nginx] allow` 中加入 `manage`（表单建站）和 `cert`（证书），自动申请另需 `[nginx.acme] enabled = true`。在 nginx 页点“新建站点”，填域名和目标地址（或网站目录）、勾选功能、选择证书方式，预览差异后一键创建；选“自动申请”时创建后立即申请证书，申请前会先在本机自检验证路径。证书保存在 `/etc/nginx/tsmonitor/certs/<站点>/`，到期前 30 天自动续期（新增域名时也会重新申请），即将到期或续期失败会出现在发现与告警中。面板生成的配置文件第一行带 `tsmonitor-managed` 标记；被手动改过的站点再次保存前需要确认覆盖。已有的手写站点照常用原始编辑器维护。
 - **审计**：每次修改请求（包括被拒绝的）都记录在“运维记录”页；助手另在 journald 中记录自己的审计日志（`journalctl -u tsmonitor-helper`）。
 - 分析脚本沙箱没有内核级隔离时，守护进程拒绝提交修改（可在 `[ops] allow_without_sandbox` 放开）。
 
@@ -209,12 +210,12 @@ hourly = "fast"
 
 - REST + SSE：见 [`docs/api.md`](docs/api.md)。
 - MCP（Streamable HTTP），两个入口：
-  - `http://127.0.0.1:8787/mcp`：只读。诊断工具（`get_health_snapshot`、`list_alerts`、`get_latest_report`、`get_report`、`list_reports`、`list_findings`、`get_system_status`、`analyze_logs`、`get_access_stats`、`get_access_history`、`get_host_metrics`、`search_log_clusters`、`list_containers`、`get_container_logs`、`list_log_sources`、`get_log_rates`、`list_ports`、`get_db_metrics`、`list_package_updates`），面板数据（`list_conversations`、`get_conversation`、`list_tasks`、`list_prompts`、`list_notify_channels`、`list_package_jobs`、`get_package_job`、`get_ops_audit`），变更申请（`list_change_actions`、`list_change_requests`、`get_change_request`），以及服务器清单（`get_ops_capabilities`、`docker_inventory`、`docker_list_images/volumes/networks`、`nginx_list_sites`、`nginx_list_files`、`nginx_get_file`、`firewall_status`、`ssh_get_config`、`ssh_list_keys`、`ssh_list_sessions`、`list_ops_jobs`、`get_ops_job`、`list_pending_changes`）。敏感值已打码。
-  - `http://127.0.0.1:8787/mcp/ops`：在只读工具之外再提供修改工具（`docker_container_action`、`docker_project_action`、`docker_image_pull`、`docker_image_remove`、`docker_prune`、`docker_volume_remove`、`nginx_test`、`nginx_reload`、`nginx_site_toggle`、`nginx_write_file`、`firewall_rule_add`、`firewall_rule_delete`、`firewall_toggle`、`ssh_set_options`、`ssh_key_add`、`ssh_key_remove`、`revert_change`）。另有 `request_change`，可申请面板上的其他操作（处理告警、触发分析、让内置 Agent 分析、定时任务、提示词、软件包更新、测试通知）。需要 `ops` 范围的 API 令牌；所有修改工具默认演练，真正修改（`dry_run: false`）必须填写 `reason`，并成为一条变更申请，按批准策略由人批准或自动放行；没有确认变更的工具。详见 [docs/mcp.md](docs/mcp.md)。
+  - `http://127.0.0.1:8787/mcp`：只读。诊断工具（`get_health_snapshot`、`list_alerts`、`get_latest_report`、`get_report`、`list_reports`、`list_findings`、`get_system_status`、`analyze_logs`、`get_access_stats`、`get_access_history`、`get_host_metrics`、`search_log_clusters`、`list_containers`、`get_container_logs`、`list_log_sources`、`get_log_rates`、`list_ports`、`get_db_metrics`、`list_package_updates`），面板数据（`list_conversations`、`get_conversation`、`list_tasks`、`list_prompts`、`list_notify_channels`、`list_package_jobs`、`get_package_job`、`get_ops_audit`），变更申请（`list_change_actions`、`list_change_requests`、`get_change_request`），以及服务器清单（`get_ops_capabilities`、`docker_inventory`、`docker_list_images/volumes/networks`、`nginx_list_sites`、`nginx_list_files`、`nginx_get_file`、`nginx_get_site`、`firewall_status`、`ssh_get_config`、`ssh_list_keys`、`ssh_list_sessions`、`list_ops_jobs`、`get_ops_job`、`list_pending_changes`）。敏感值已打码。
+  - `http://127.0.0.1:8787/mcp/ops`：在只读工具之外再提供修改工具（`docker_container_action`、`docker_project_action`、`docker_image_pull`、`docker_image_remove`、`docker_prune`、`docker_volume_remove`、`nginx_test`、`nginx_reload`、`nginx_site_toggle`、`nginx_write_file`、`nginx_save_site`、`nginx_delete_site`、`nginx_issue_certificate`、`firewall_rule_add`、`firewall_rule_delete`、`firewall_toggle`、`ssh_set_options`、`ssh_key_add`、`ssh_key_remove`、`revert_change`）。另有 `request_change`，可申请面板上的其他操作（处理告警、触发分析、让内置 Agent 分析、定时任务、提示词、软件包更新、测试通知）。需要 `ops` 范围的 API 令牌；所有修改工具默认演练，真正修改（`dry_run: false`）必须填写 `reason`，并成为一条变更申请，按批准策略由人批准或自动放行；没有确认变更的工具。详见 [docs/mcp.md](docs/mcp.md)。
   - 通过反向代理访问时，把域名加入 `[server] mcp_allowed_hosts`。接入示例见 [`docs/mcp.md`](docs/mcp.md)。
 - 访问分析：配置 `kind = "nginx_access"` 的日志源后，日志页显示请求量、状态码、P50/P95/P99 延迟（日志格式需包含 `$request_time`）、热门与慢接口、虚拟主机、UA 分类和可疑来源；支持 combined 格式和 JSON 访问日志。按分钟持久化，可查看 24 小时 / 7 天 / 30 天历史。5xx 比例、单地址请求洪泛、扫描敏感路径，以及路径或参数中的 SQL / 脚本 / 命令注入载荷（URL 解码后匹配，不看状态码和速率）会触发告警（阈值见 `[thresholds] access_*`）。
 - systemd journal：默认把 warning 及以上级别的日志作为 `journal` 日志源；`[journal] units` 中的单元会完整跟读。没有 `/var/log/auth.log` 的主机会改用 journal 做 SSH 登录审计。
-- nginx 体检：每次安全巡检读取 nginx 配置，给出版本暴露、gzip、TLS 协议、HTTP/2、keepalive、缺少 `$request_time` 等建议，并根据访问统计列出慢接口。
+- nginx 体检：每次安全巡检读取 nginx 配置，给出版本暴露、gzip、TLS 协议、HTTP/2、keepalive、缺少 `$request_time` 等建议，并根据访问统计列出慢接口；面板管理的站点还会检查证书是否即将到期或续期失败（`cert` 类发现）。
 - Webhook：`[[notify.webhooks]]` 配置后，告警和报告会 POST 过去；配置 `secret_env` 后带 `X-TSM-Signature: sha256=<HMAC>`。
 
 ## 本地开发
