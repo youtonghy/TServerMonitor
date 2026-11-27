@@ -39,7 +39,7 @@ export const findingSeverityOrder: FindingSeverity[] = ["critical", "high", "med
 
 export const findingCategoryLabel: Record<string, string> = {
   port: "端口", login: "登录", update: "更新", kernel: "内核", network: "网络",
-  db: "数据库", container: "容器", config: "配置", nginx: "nginx", perf: "性能",
+  db: "数据库", container: "容器", config: "配置", nginx: "nginx", perf: "性能", cert: "证书",
 };
 
 export const reportKindLabel: Record<ReportKind, string> = {

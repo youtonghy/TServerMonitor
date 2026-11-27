@@ -3,7 +3,7 @@
 import { ApiError, withSudo, type Api } from "./client";
 import type {
   AccessRange, AccessStats, AuditEntry, DockerImage, DockerInventory, DockerNetwork, DockerVolume, FirewallStatus,
-  NginxFile, NginxFileEntry, NginxSites, OpsCapabilities, OpsJob, OpsRead, PendingChange, SshConfig, SshKeys, SshSession,
+  CertInfo, NginxFile, NginxFileEntry, NginxSiteDetail, NginxSites, OpsCapabilities, SiteSpec, OpsJob, OpsRead, PendingChange, SshConfig, SshKeys, SshSession,
   StreamEventMap, StreamEventName,
 } from "./types";
 
@@ -17,7 +17,11 @@ const caps: OpsCapabilities = {
   write_ready: true, write_reason: null,
   domains: {
     docker: { enabled: true, allow: ["start", "stop", "restart", "kill", "remove", "image_pull", "image_remove", "image_prune", "project"] },
-    nginx: { enabled: true, allow: ["test", "reload", "site", "edit"] },
+    nginx: {
+      enabled: true, allow: ["test", "reload", "site", "edit", "manage", "cert"],
+      site_roots: ["/var/www"], cert_paths: ["/etc/letsencrypt", "/etc/ssl"],
+      acme: { enabled: true, staging: false, custom_directory: false, renew_days: 30 },
+    },
     firewall: { enabled: true, allow: ["add_rule", "delete_rule", "toggle"], backend: "ufw" },
     ssh: { enabled: true, allow: ["options", "key_add", "key_remove"] },
   },
@@ -70,14 +74,78 @@ const files: Record<string, string> = {
   "conf.d/gzip.conf": "gzip on;\ngzip_types text/css application/javascript application/json;\n",
   "snippets/security-headers.conf": "add_header X-Content-Type-Options nosniff;\nadd_header X-Frame-Options SAMEORIGIN;\n",
 };
-const enabled = new Set(["shop"]);
+const enabled = new Set(["shop", "blog", "api"]);
+
+// Managed sites: spec + certificate, rendered like the helper's template (abridged).
+const DAY = 86_400_000;
+const MARKER = "# tsmonitor-managed v1";
+const managed: Record<string, { spec: SiteSpec; cert: CertInfo; rendered: string }> = {};
+const noCert = (mode: CertInfo["mode"]): CertInfo => ({ mode, not_after: null, not_before: null, names: [], issuer: null, last_attempt: null, last_error: null });
+function render(spec: SiteSpec, cert: CertInfo): string {
+  const f = spec.features;
+  const tls = spec.ssl.mode !== "none" && cert.not_after !== null;
+  const names = spec.domains.join(" ");
+  const body = (): string[] => {
+    const out: string[] = [];
+    if (f.access_log) out.push(`    access_log /var/log/nginx/${spec.name}.access.log;`, `    error_log /var/log/nginx/${spec.name}.error.log;`);
+    if (f.client_max_body_mb > 0) out.push(`    client_max_body_size ${f.client_max_body_mb}m;`);
+    if (f.gzip) out.push("", "    gzip on;", "    gzip_vary on;", "    gzip_min_length 1024;");
+    out.push("");
+    if (spec.kind === "proxy") {
+      out.push("    location / {", `        proxy_pass ${spec.proxy.upstream};`, "        proxy_http_version 1.1;", `        proxy_set_header Host ${spec.proxy.pass_host ? "$host" : "$proxy_host"};`, "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;");
+      if (spec.proxy.websocket) out.push("        proxy_set_header Upgrade $http_upgrade;", "        proxy_set_header Connection \"upgrade\";");
+      out.push(`        proxy_read_timeout ${spec.proxy.timeout_secs}s;`, "    }");
+    } else {
+      out.push(`    root ${spec.static.root};`, `    index ${spec.static.index};`, "", "    location / {", `        try_files $uri $uri/ ${spec.static.spa ? "/index.html" : "=404"};`, "    }");
+      if (f.static_cache) out.push("", "    location ~* \\.(?:css|js|png|jpe?g|svg|woff2?)$ {", "        expires 30d;", "    }");
+    }
+    if (spec.extra.trim()) out.push("", "    # 自定义配置", ...spec.extra.trim().split("\n").map(l => `    ${l}`));
+    return out;
+  };
+  const lines = ["# 由 TServerMonitor 生成。请在面板的 nginx 站点中修改；手动改动会在下次保存时提示覆盖。"];
+  if (spec.ssl.mode !== "none" && !tls) lines.push("# 证书尚未就绪：暂时只提供 HTTP，证书就绪后自动启用 HTTPS。");
+  lines.push("server {", `    listen ${spec.listen.http};`, `    server_name ${names};`);
+  if (spec.ssl.mode === "acme") lines.push("", "    location ^~ /.well-known/acme-challenge/ {", "        alias /etc/nginx/tsmonitor/acme-challenge/;", "    }");
+  if (tls && f.force_https) lines.push("", "    location / {", "        return 301 https://$host$request_uri;", "    }");
+  else lines.push(...body());
+  lines.push("}");
+  if (tls) {
+    const dir = spec.ssl.mode === "path" ? null : `/etc/nginx/tsmonitor/certs/${spec.name}`;
+    lines.push("", "server {", `    listen ${spec.listen.https} ssl;`, ...(f.http2 ? ["    http2 on;"] : []), `    server_name ${names};`, "",
+      `    ssl_certificate ${dir ? `${dir}/fullchain.pem` : spec.ssl.cert_path};`, `    ssl_certificate_key ${dir ? `${dir}/privkey.pem` : spec.ssl.key_path};`, "    ssl_protocols TLSv1.2 TLSv1.3;",
+      ...(f.hsts ? ["    add_header Strict-Transport-Security \"max-age=31536000\" always;"] : []), ...body(), "}");
+  }
+  return `${MARKER} name=${spec.name} kind=${spec.kind}\n${lines.join("\n")}\n`;
+}
+function seedSite(spec: SiteSpec, cert: CertInfo) {
+  const rendered = render(spec, cert);
+  managed[spec.name] = { spec, cert, rendered };
+  files[`sites-available/${spec.name}`] = rendered;
+}
+const base = (name: string, domains: string[]): SiteSpec => ({
+  name, domains, kind: "proxy",
+  proxy: { upstream: "http://127.0.0.1:3000", websocket: false, pass_host: true, timeout_secs: 60 },
+  static: { root: `/var/www/${name}`, index: "index.html index.htm", spa: false },
+  listen: { http: 80, https: 443, ipv6: false },
+  features: { force_https: true, http2: true, hsts: false, gzip: true, static_cache: true, access_log: true, client_max_body_mb: 0 },
+  ssl: { mode: "none", cert_path: "", key_path: "" },
+  extra: "",
+});
+seedSite(
+  { ...base("blog", ["blog.example.com", "www.blog.example.com"]), kind: "static", static: { root: "/var/www/blog", index: "index.html", spa: true }, ssl: { mode: "acme", cert_path: "", key_path: "" } },
+  { mode: "acme", not_after: Date.now() + 62 * DAY, not_before: Date.now() - 28 * DAY, names: ["blog.example.com", "www.blog.example.com"], issuer: "C=US, O=Let's Encrypt, CN=R11", last_attempt: Date.now() - 28 * DAY, last_error: null },
+);
+seedSite(
+  { ...base("api", ["api.example.com"]), proxy: { upstream: "http://127.0.0.1:4000", websocket: true, pass_host: true, timeout_secs: 120 }, ssl: { mode: "acme", cert_path: "", key_path: "" } },
+  { ...noCert("acme"), last_attempt: Date.now() - 2 * 3_600_000, last_error: "域名验证未通过（Invalid）：api.example.com：urn:ietf:params:acme:error:dns: DNS problem: NXDOMAIN looking up A for api.example.com" },
+);
 async function sha(text: string): Promise<string> {
   const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 const editable = (p: string) => /^(conf\.d|sites-available|snippets)\//.test(p);
 const siteInfo = (text: string) => ({
-  server_names: [...text.matchAll(/server_name\s+([^;]+);/g)].flatMap(m => m[1].trim().split(/\s+/)),
+  server_names: [...new Set([...text.matchAll(/server_name\s+([^;]+);/g)].flatMap(m => m[1].trim().split(/\s+/)))],
   listen: [...text.matchAll(/listen\s+([^;]+);/g)].map(m => m[1].trim()),
 });
 const sites = (): NginxSites => ({
@@ -85,7 +153,13 @@ const sites = (): NginxSites => ({
   sites: Object.keys(files).filter(p => p.startsWith("sites-available/")).map(p => {
     const name = p.slice("sites-available/".length);
     const info = siteInfo(files[p]);
-    return { name, file: p, enabled: enabled.has(name), layout: "sites_enabled" as const, ...info, ssl: info.listen.some(l => l.includes("ssl")) };
+    const m = managed[name];
+    const marked = files[p].startsWith(`${MARKER} name=${name} `);
+    return {
+      name, file: p, enabled: enabled.has(name), layout: "sites_enabled" as const, ...info, ssl: info.listen.some(l => l.includes("ssl")),
+      managed: Boolean(m && marked), kind: m && marked ? m.spec.kind : undefined, drifted: Boolean(m && marked && files[p] !== m.rendered),
+      cert: m && marked ? m.cert : undefined,
+    };
   }),
 });
 
@@ -229,6 +303,75 @@ async function apply(emit: Emit, call: string, a: Record<string, unknown>, dry: 
       if (content.includes("BROKEN")) return { log: [`写入 ${path}`, "$ nginx -t", "nginx: [emerg] unknown directive \"BROKEN\" in /etc/nginx/" + path + ":1", "回滚：nginx -t 未通过"], error: "nginx -t 未通过：\nnginx: [emerg] unknown directive \"BROKEN\"；已恢复原配置" };
       files[path] = content;
       return { log: [`写入 ${path}`, "$ nginx -t", "nginx: configuration file /etc/nginx/nginx.conf test is successful", "$ systemctl reload nginx.service"], result: { changed: true, diff, sha256: await sha(content) } };
+    }
+    case "nginx.site_save": {
+      const spec = structuredClone(a.spec as SiteSpec);
+      const path = `sites-available/${spec.name}`;
+      const old = files[path];
+      const prev = managed[spec.name];
+      const base = a.base_sha256 ? String(a.base_sha256) : null;
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/.test(spec.name)) return { log: [], error: `无效的站点名：${JSON.stringify(spec.name)}` };
+      if (spec.domains.length === 0) return { log: [], error: "至少需要绑定一个域名" };
+      if (spec.kind === "proxy" && !/^https?:\/\/[^\s;{}]+$/.test(spec.proxy.upstream)) return { log: [], error: "目标地址必须是 http:// 或 https:// 开头的完整地址" };
+      if (spec.kind === "static" && !spec.static.root.startsWith("/var/www/")) return { log: [], error: "网站根目录必须位于这些目录之下：/var/www（helper.toml 的 [nginx] site_roots）" };
+      if (spec.ssl.mode === "acme" && spec.listen.http !== 80) return { log: [], error: "自动申请证书使用 HTTP-01 验证，站点必须监听 80 端口" };
+      for (const [n, other] of Object.entries(managed)) {
+        const hit = n !== spec.name && spec.domains.find(d => other.spec.domains.includes(d));
+        if (hit) return { log: [], error: `域名 ${hit} 已绑定在站点 ${n}（sites-available/${n}）上` };
+      }
+      if (old !== undefined && base === null) return { log: [], error: `已存在同名站点 ${path}，请换一个站点名` };
+      if (old !== undefined && base !== null && (await sha(old)) !== base) return { log: [], error: `${path} 在你打开之后被修改过，请重新打开后再保存` };
+      if (old !== undefined && prev && old !== prev.rendered && !a.overwrite) return { log: [], error: `${path} 生成后被手动修改过，保存会覆盖这些修改；请查看差异后确认覆盖` };
+      const cert = prev && prev.cert.mode === spec.ssl.mode ? prev.cert : noCert(spec.ssl.mode);
+      const text = render(spec, cert);
+      const diff = unifiedDiff(path, old ?? "", text);
+      const log = [`${old === undefined ? "创建" : "更新"} ${path}`];
+      if (spec.ssl.mode !== "none" && cert.not_after === null) log.push("证书尚未就绪：先以 HTTP 提供服务，证书就绪后自动切换到 HTTPS");
+      if (dry) return { log: [`（演练模式）将${old === undefined ? "创建" : "更新"} ${path}，未实际执行`], result: { dry_run: true, diff, file: path } };
+      if (spec.kind === "static") log.push(`创建网站目录 ${spec.static.root}`);
+      files[path] = text;
+      managed[spec.name] = { spec, cert, rendered: text };
+      if (old === undefined) { enabled.add(spec.name); log.push(`启用：sites-enabled/${spec.name}`); }
+      return { log: [...log, "$ nginx -t", "nginx: configuration file /etc/nginx/nginx.conf test is successful", "$ systemctl reload nginx.service"], result: { changed: true, diff, file: path, sha256: await sha(text) } };
+    }
+    case "nginx.site_delete": {
+      const name = str("name");
+      if (!managed[name]) return { log: [], error: `站点 ${name} 不是由面板管理的站点，请在配置文件中手动删除` };
+      const log = [`删除站点 ${name}：sites-available/${name}`];
+      if (dry) return { log: [...log, dryNote], result: { dry_run: true } };
+      delete files[`sites-available/${name}`];
+      delete managed[name];
+      enabled.delete(name);
+      return { log: [...log, "$ nginx -t", "nginx: configuration file /etc/nginx/nginx.conf test is successful", "$ systemctl reload nginx.service"], result: { changed: true } };
+    }
+    case "nginx.cert_upload": {
+      const m = managed[str("name")];
+      if (!m) return { log: [], error: "站点不是由面板管理的站点" };
+      if (!str("cert_pem").includes("BEGIN CERTIFICATE")) return { log: [], error: "没有找到证书（应以 -----BEGIN CERTIFICATE----- 开头）" };
+      if (!/PRIVATE KEY-----\s*$/.test(str("key_pem"))) return { log: [], error: "私钥必须是未加密的 PEM（-----BEGIN PRIVATE KEY----- 或 RSA / EC PRIVATE KEY）" };
+      m.spec.ssl.mode = "upload";
+      m.cert = { ...noCert("upload"), not_after: Date.now() + 365 * DAY, not_before: Date.now(), names: m.spec.domains, issuer: "C=CN, O=Example CA, CN=Example RSA CA" };
+      m.rendered = render(m.spec, m.cert);
+      files[`sites-available/${m.spec.name}`] = m.rendered;
+      return { log: [`证书：${m.spec.domains.join(", ")}，签发者 Example CA`, `更新 sites-available/${m.spec.name}（启用 HTTPS）`, "$ nginx -t", "nginx: configuration file /etc/nginx/nginx.conf test is successful", "$ systemctl reload nginx.service"], result: { changed: true, not_after: m.cert.not_after } };
+    }
+    case "nginx.cert_issue": {
+      const m = managed[str("name")];
+      if (!m || m.spec.ssl.mode !== "acme") return { log: [], error: "请先把站点的 SSL 方式设为“自动申请”并保存" };
+      const log = [`为 ${m.spec.domains.join(", ")} 申请证书（https://acme-v02.api.letsencrypt.org/directory）`];
+      if (dry) return { log: [...log, "（演练模式）将进行本机自检、向 CA 申请证书并启用 HTTPS，未实际执行"], result: { dry_run: true } };
+      if (m.spec.domains.some(d => d.startsWith("api."))) {
+        m.cert = { ...m.cert, last_attempt: Date.now(), last_error: `域名验证未通过（Invalid）：${m.spec.domains[0]}：DNS problem: NXDOMAIN` };
+        return { log: [...log, "自检通过：nginx 能正确提供验证文件", `发布 ${m.spec.domains[0]} 的验证文件`, `请求 CA 验证 ${m.spec.domains[0]}`], error: m.cert.last_error ?? "" };
+      }
+      m.cert = { mode: "acme", not_after: Date.now() + 90 * DAY, not_before: Date.now(), names: m.spec.domains, issuer: "C=US, O=Let's Encrypt, CN=R10", last_attempt: Date.now(), last_error: null };
+      m.rendered = render(m.spec, m.cert);
+      files[`sites-available/${m.spec.name}`] = m.rendered;
+      return {
+        log: [...log, "自检通过：nginx 能正确提供验证文件", ...m.spec.domains.flatMap(d => [`发布 ${d} 的验证文件`, `请求 CA 验证 ${d}`]), "验证通过，生成私钥并签发证书",
+          `证书已签发：${m.spec.domains.join(", ")}`, `更新 sites-available/${m.spec.name}（启用 HTTPS）`, "$ nginx -t", "nginx: configuration file /etc/nginx/nginx.conf test is successful", "$ systemctl reload nginx.service"],
+        result: { changed: true, not_after: m.cert.not_after },
+      };
     }
     case "firewall.add": {
       const { action, port, proto, from } = a as { action: string; port: string; proto: string; from?: string | null };
@@ -397,6 +540,13 @@ export function opsMock(emit: Emit): Pick<Api, "accessHistory" | "opsCapabilitie
           const text = files[params.path ?? ""];
           if (text === undefined) return Promise.reject(new ApiError(400, `${params.path} 不存在`));
           return ok({ path: params.path, content: text, sha256: await sha(text), editable: editable(params.path) } satisfies NginxFile);
+        }
+        case "nginx.site_get": {
+          const m = managed[params.name ?? ""];
+          if (!m) return Promise.reject(new ApiError(400, `站点 ${params.name} 不是由面板管理的站点`));
+          const path = `sites-available/${m.spec.name}`;
+          const text = files[path];
+          return ok({ spec: m.spec, cert: m.cert, file: path, exists: text !== undefined, enabled: enabled.has(m.spec.name), sha256: text === undefined ? null : await sha(text), drifted: text !== m.rendered } satisfies NginxSiteDetail);
         }
         case "firewall.status": return ok(fw);
         case "ssh.config": return ok(ssh);

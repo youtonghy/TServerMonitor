@@ -48,17 +48,34 @@ export function OpsNotice({ caps, domain, source }: { caps: OpsCapabilities | un
 export const JOB_TONE = { running: "info", succeeded: "success", failed: "danger", unknown: "warning" } as const;
 export const JOB_LABEL = { running: "进行中", succeeded: "完成", failed: "失败", unknown: "状态未知" } as const;
 
-/** Runs helper calls for one page. `run` resolves to the job (also when it failed) or null on refusal. */
+/** Polls a job until it is no longer running (the server answers `running` after ~20 s). */
+async function finished(j: OpsJob, onUpdate: (j: OpsJob) => void): Promise<OpsJob> {
+  const until = Date.now() + 15 * 60_000;
+  while (j.status === "running" && Date.now() < until) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      j = await api.opsJob(j.id);
+      onUpdate(j);
+    } catch {
+      // keep polling through a brief network error
+    }
+  }
+  return j;
+}
+
+/** Runs helper calls for one page. `run` resolves to the job (also when it failed) or null on refusal.
+ * With `follow`, a job still running when the server answers is polled until it ends. */
 export function useOpsAction() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<OpsJob | null>(null);
-  const run = useCallback(async (call: string, args: Record<string, unknown> = {}, dryRun = false): Promise<OpsJob | null> => {
+  const run = useCallback(async (call: string, args: Record<string, unknown> = {}, dryRun = false, opts: { follow?: boolean } = {}): Promise<OpsJob | null> => {
     setBusy(call);
     setError(null);
     try {
-      const j = await api.opsRun(call, args, dryRun);
+      let j = await api.opsRun(call, args, dryRun);
       setJob(j);
+      if (opts.follow && j.status === "running") j = await finished(j, setJob);
       if (j.status === "failed") setError(j.error ?? "操作失败");
       return j;
     } catch (e) {

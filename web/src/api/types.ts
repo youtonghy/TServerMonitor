@@ -355,7 +355,12 @@ export type StreamEventName = keyof StreamEventMap;
 // Server management through the optional root ops helper
 
 export type OpsDomain = "docker" | "nginx" | "firewall" | "ssh";
-export interface OpsDomainCaps { enabled: boolean; allow: string[]; backend?: string | null }
+export interface OpsDomainCaps {
+  enabled: boolean; allow: string[]; backend?: string | null;
+  /** nginx only: where managed static sites may live and existing certificates may be read. */
+  site_roots?: string[]; cert_paths?: string[];
+  acme?: { enabled: boolean; staging: boolean; custom_directory: boolean; renew_days: number };
+}
 export interface OpsCapabilities {
   /** The helper answered. */
   available: boolean; reason: string | null; version: string | null;
@@ -391,6 +396,34 @@ export interface DockerNetwork { id: string; name: string; driver: string; scope
 export interface NginxSite {
   name: string; file: string; enabled: boolean; layout: "sites_enabled" | "conf_d";
   server_names: string[]; listen: string[]; ssl: boolean;
+  /** Generated from a form (managed site); manual sites are edited as files. */
+  managed?: boolean; kind?: SiteKind;
+  /** A managed file that was edited by hand. */
+  drifted?: boolean;
+  cert?: CertInfo;
+}
+export type SiteKind = "proxy" | "static";
+export type SslMode = "none" | "acme" | "upload" | "path";
+export interface SiteSpec {
+  name: string; domains: string[]; kind: SiteKind;
+  proxy: { upstream: string; websocket: boolean; pass_host: boolean; timeout_secs: number };
+  static: { root: string; index: string; spa: boolean };
+  listen: { http: number; https: number; ipv6: boolean };
+  features: {
+    force_https: boolean; http2: boolean; hsts: boolean; gzip: boolean; static_cache: boolean;
+    access_log: boolean; client_max_body_mb: number;
+  };
+  ssl: { mode: SslMode; cert_path: string; key_path: string };
+  extra: string;
+}
+export interface CertInfo {
+  mode: SslMode; not_after: number | null; not_before: number | null; names: string[]; issuer: string | null;
+  last_attempt: number | null; last_error: string | null;
+}
+/** `nginx.site_get`: a managed site's settings; `sha256` is passed back as base_sha256. */
+export interface NginxSiteDetail {
+  spec: SiteSpec; cert: CertInfo; file: string; exists: boolean; enabled: boolean;
+  sha256: string | null; drifted: boolean;
 }
 export interface NginxSites { layout: "sites_enabled" | "conf_d"; sites: NginxSite[] }
 export interface NginxFileEntry { path: string; size: number; editable: boolean }
