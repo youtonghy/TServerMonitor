@@ -1,4 +1,4 @@
-import { generateText, isStepCount, jsonSchema, Output, streamText, tool, type ToolSet } from 'ai';
+import { generateText, isStepCount, jsonSchema, type ModelMessage, Output, streamText, tool, type ToolSet } from 'ai';
 
 import { type RunMessage, send } from './protocol.js';
 import { createModel, providerOptionsFor, reasoningFor } from './providers.js';
@@ -140,6 +140,7 @@ async function runChat(msg: RunMessage, abortSignal: AbortSignal): Promise<void>
       messages: msg.messages ?? [],
       tools,
       stopWhen: isStepCount(msg.max_steps),
+      prepareStep: finalStepWithoutTools(msg.max_steps - 1),
       onStepEnd: (step: { text: string }) => {
         if (step.text?.trim()) send({ type: 'step', run_id: runId, text: step.text });
       },
@@ -156,48 +157,81 @@ async function runChat(msg: RunMessage, abortSignal: AbortSignal): Promise<void>
   send({ type: 'result', run_id: runId, output: result.text, usage: result.usage, mode: 'chat' });
 }
 
+const FINAL_STEP_NUDGE = '工具调用次数已用完。不要再调用工具，直接根据以上已经收集到的信息给出最终结论。';
+
+/**
+ * `prepareStep` for a run limited to `lastStep + 1` steps: the last step may not call tools, so a
+ * model that keeps exploring still ends with an answer instead of a dangling tool call. Tools stay
+ * declared (`toolChoice: 'none'`) because the Messages API rejects tool_use history without them.
+ */
+export function finalStepWithoutTools(lastStep: number) {
+  return ({ stepNumber, messages }: { stepNumber: number; messages: ModelMessage[] }) =>
+    stepNumber >= lastStep
+      ? { toolChoice: 'none' as const, messages: [...messages, { role: 'user' as const, content: FINAL_STEP_NUDGE }] }
+      : undefined;
+}
+
 async function runStructured(msg: RunMessage, abortSignal: AbortSignal): Promise<void> {
   const runId = msg.run_id;
-  const onStepFinish = (step: { text: string }) => {
+  const prompt = msg.prompt ?? '';
+  // assistant and tool messages of the current attempt, so a text retry can reuse the evidence
+  const history: ModelMessage[] = [];
+  const onStepFinish = (step: { text: string; response: { messages: ModelMessage[] } }) => {
+    history.push(...step.response.messages);
     if (step.text?.trim()) send({ type: 'step', run_id: runId, text: step.text });
   };
   const schema = msg.output_schema ?? {};
   const model = createModel(msg.model);
   const tools = buildTools(msg);
+  // +1: producing the final answer is a step of its own
+  const stopWhen = isStepCount(msg.max_steps + 1);
+  const prepareStep = finalStepWithoutTools(msg.max_steps);
   try {
-    const result = await withEffort(reasoningFor(msg.model), (reasoning) => generateText({
-      model,
-      reasoning,
-      system: msg.system,
-      prompt: msg.prompt ?? '',
-      tools,
-      abortSignal,
-      output: Output.object({ schema: jsonSchema(schema) }),
-      // +1: producing the structured output is a step of its own
-      stopWhen: isStepCount(msg.max_steps + 1),
-      onStepFinish,
-      providerOptions: providerOptionsFor(msg.model, reasoning),
-      maxRetries: 2,
-    }));
+    const result = await withEffort(reasoningFor(msg.model), (reasoning) => {
+      history.length = 0;
+      return generateText({
+        model,
+        reasoning,
+        system: msg.system,
+        prompt,
+        tools,
+        abortSignal,
+        output: Output.object({ schema: jsonSchema(schema) }),
+        stopWhen,
+        prepareStep,
+        onStepFinish,
+        providerOptions: providerOptionsFor(msg.model, reasoning),
+        maxRetries: 2,
+      });
+    });
     send({ type: 'result', run_id: runId, output: result.output, usage: result.usage, mode: 'structured' });
     return;
   } catch (e) {
     if (!isStructuredOutputFailure(e)) throw e;
-    process.stderr.write(`structured output failed (${errorMessage(e)}), retrying in text mode\n`);
+    process.stderr.write(
+      `structured output failed (${errorMessage(e)}) after ${history.length} messages, retrying in text mode\n`,
+    );
   }
 
-  // Text-mode fallback for endpoints without structured output support.
-  const result = await withEffort(reasoningFor(msg.model), (reasoning) => generateText({
-    model,
-    reasoning,
-    system: `${msg.system}\n\n最终回答只输出一个 JSON 对象，不要输出其他文字。JSON 必须符合以下 JSON Schema：\n${JSON.stringify(schema)}`,
-    prompt: msg.prompt ?? '',
-    tools,
-    abortSignal,
-    stopWhen: isStepCount(msg.max_steps + 1),
-    onStepFinish,
-    providerOptions: providerOptionsFor(msg.model, reasoning),
-    maxRetries: 2,
-  }));
+  // Text mode, for endpoints without (reliable) structured output support.
+  const system = `${msg.system}\n\n最终回答只输出一个 JSON 对象，不要输出其他文字。JSON 必须符合以下 JSON Schema：\n${JSON.stringify(schema)}`;
+  const gathered = [...history];
+  const result = await withEffort(reasoningFor(msg.model), (reasoning) => {
+    const common = { model, reasoning, system, tools, abortSignal, onStepFinish, maxRetries: 2,
+      providerOptions: providerOptionsFor(msg.model, reasoning) };
+    history.length = 0;
+    // the tools already ran: only ask for the answer, in one step
+    return gathered.length > 0
+      ? generateText({
+          ...common,
+          messages: [
+            { role: 'user', content: prompt },
+            ...gathered,
+            { role: 'user', content: '不要再调用工具。根据以上已经收集到的信息，只输出最终的 JSON 对象。' },
+          ],
+          toolChoice: 'none',
+        })
+      : generateText({ ...common, prompt, stopWhen, prepareStep });
+  });
   send({ type: 'result', run_id: runId, output: extractJson(result.text), usage: result.usage, mode: 'text' });
 }
