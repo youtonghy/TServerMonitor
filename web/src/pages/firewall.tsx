@@ -98,7 +98,7 @@ export default function FirewallPage() {
               <li key={s.ip} className={local.providerRow}>
                 <div className={local.providerMain}>
                   <code className={styles.code}>{s.ip}</code>
-                  <span className={`${styles.small} ${styles.muted}`}>{s.requests} 个请求 · {s.s4xx ?? 0} 个 4xx · {s.scan ?? 0} 次扫描路径</span>
+                  <span className={`${styles.small} ${styles.muted}`}>{s.requests} 个请求 · {s.s4xx ?? 0} 个 4xx · {s.scan ?? 0} 次扫描路径{(s.inject ?? 0) > 0 ? ` · ${s.inject} 次注入载荷` : ""}</span>
                 </div>
                 {allowAdd && <Button size="sm" variant="secondary" onClick={() => setAdding({ action: "deny", port: "1-65535", proto: "tcp", from: s.ip })}>封禁</Button>}
               </li>

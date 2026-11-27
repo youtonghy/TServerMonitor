@@ -342,6 +342,18 @@ pub fn access_conditions(
         }
     }
     for ip in &s.suspicious {
+        if ip.inject >= t.access_inject_hits {
+            out.push(AccessCond {
+                fingerprint: format!("access:inject:{}", ip.ip),
+                severity: Severity::Warning,
+                title: format!("{} 发送了注入攻击载荷", ip.ip),
+                summary: format!(
+                    "最近 {} 分钟该地址有 {} 个请求的路径或参数带有 SQL 注入、脚本或命令注入特征，共 {} 个请求、{} 个 4xx。",
+                    s.window_mins, ip.inject, ip.requests, ip.s4xx
+                ),
+                suggestion: "按该地址检索访问日志与应用日志，确认这些请求未成功执行（返回 200 不代表无害）；检查对应接口是否使用参数化查询与输出转义，可在防火墙页对该地址添加拒绝规则。",
+            });
+        }
         if ip.scan >= t.access_scan_hits {
             out.push(AccessCond {
                 fingerprint: format!("access:scan:{}", ip.ip),
@@ -950,11 +962,20 @@ mod tests {
         for _ in 0..25 {
             a.record(r#"192.0.2.66 - - [x] "GET /.env HTTP/1.1" 404 0"#, t);
         }
+        // low-rate SQL injection in the query string that the app answers with 200
+        for i in 0..3 {
+            a.record(
+                &format!(r#"198.51.100.9 - - [x] "GET /item.php?id={i}%27%20UNION%20SELECT%20user,pass%20FROM%20users--%20 HTTP/1.1" 200 512"#),
+                t,
+            );
+        }
         let th = crate::config::Thresholds::default();
         let c = access_conditions(&a.stats(5, t, 50, false), &th);
         let fps: Vec<&str> = c.iter().map(|c| c.fingerprint.as_str()).collect();
         assert!(fps.contains(&"access:5xx"), "{fps:?}");
         assert!(fps.contains(&"access:scan:192.0.2.66"), "{fps:?}");
+        assert!(fps.contains(&"access:inject:198.51.100.9"), "{fps:?}");
+        assert!(!fps.contains(&"access:inject:192.0.2.66"), "{fps:?}");
         assert_eq!(c[0].severity, Severity::Critical);
         assert!(!fps.iter().any(|f| f.starts_with("access:flood")));
         let quiet = crate::collect::access::Access::default();

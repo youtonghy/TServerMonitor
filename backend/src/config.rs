@@ -337,6 +337,8 @@ pub struct Thresholds {
     pub access_flood_per_min: u64,
     /// Scanner-style probes (/.env, /wp-login.php, ...) from one address within 5 minutes.
     pub access_scan_hits: u64,
+    /// Requests carrying injection payloads (SQL, script, command) from one address within 5 minutes.
+    pub access_inject_hits: u64,
 }
 
 impl Default for Thresholds {
@@ -356,6 +358,7 @@ impl Default for Thresholds {
             access_min_requests: 100,
             access_flood_per_min: 600,
             access_scan_hits: 20,
+            access_inject_hits: 3,
         }
     }
 }

@@ -97,12 +97,13 @@ access_5xx_crit = 0.2
 access_min_requests = 100    # ... once this many requests were seen
 access_flood_per_min = 600   # one client address above this rate
 access_scan_hits = 20        # scanner probes (/.env, /wp-login.php, ...) from one address
+access_inject_hits = 3       # requests with SQL / script / command injection payloads from one address
 
 [ai]
 enabled = true
 node_bin = "node"     # Node.js 20+ runs the AI sidecar (Vercel AI SDK)
 daily_budget = 200    # max model-backed analyses per day
-max_steps = 12        # tool-call rounds per analysis
+max_steps = 12        # tool-call rounds per analysis; the last round must answer without tools
 timeout_secs = 300
 idle_exit_secs = 300
 

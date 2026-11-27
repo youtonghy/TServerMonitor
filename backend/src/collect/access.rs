@@ -1,6 +1,6 @@
 //! Real-time access analysis for `nginx_access` sources: per-minute request counts, status
 //! classes, bytes, latency histogram, busiest and slowest paths, client addresses (with 4xx and
-//! scanner hits), virtual hosts and user-agent classes.
+//! scanner and injection hits), virtual hosts and user-agent classes.
 //!
 //! Accepted line formats:
 //! * nginx `combined`, optionally followed by `$request_time` (or `rt=` / `request_time=`) and
@@ -44,6 +44,58 @@ static SCAN: LazyLock<Regex> = LazyLock::new(|| {
     .expect("static regex")
 });
 
+/// Injection payloads (SQL, script, command, traversal) in the URL-decoded path and query.
+static INJECT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?i)",
+        // SQL
+        r"\bunion\b[\s/*+()]+(?:all[\s/*+]+|distinct[\s/*+]+)?select\b",
+        r"|\binformation_schema\b|@@version\b|/\*!\d*",
+        r"|\b(?:sleep|benchmark|pg_sleep|extractvalue|updatexml|load_file)\s*\(",
+        r"|\bwaitfor\s+delay\b|\binto\s+(?:out|dump)file\b",
+        r"|'\s*(?:or|and)\s+(?:'[^']*'\s*=\s*'|\d+\s*=\s*\d+|true\b)",
+        r"|\b(?:or|and)\s+\d+\s*=\s*\d+\b",
+        r"|'\s*(?:--|#|/\*)|;\s*(?:drop|delete|insert|update|select|shutdown)\s",
+        // script
+        r"|<script\b|javascript:|\bon(?:error|load|mouseover|focus)\s*=",
+        // command, JNDI, traversal
+        r"|\$\{jndi:|\$\((?:id|whoami|curl|wget|cat)\b|`(?:id|whoami)`",
+        r"|[;|]\s*(?:cat|wget|curl|bash|sh|nc|id|whoami)(?:\s|$)",
+        r"|(?:\.\./){2,}|/etc/(?:passwd|shadow)\b",
+    ))
+    .expect("static regex")
+});
+
+/// Percent-decodes twice (payloads are often double-encoded) and turns `+` into a space.
+fn decode_uri(raw: &str) -> String {
+    fn once(s: &str) -> String {
+        let hex = |c: u8| (c as char).to_digit(16);
+        let b = s.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%'
+                && let (Some(h), Some(l)) = (
+                    b.get(i + 1).and_then(|&c| hex(c)),
+                    b.get(i + 2).and_then(|&c| hex(c)),
+                )
+            {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+            out.push(if b[i] == b'+' { b' ' } else { b[i] });
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+    once(&once(raw))
+}
+
+fn is_injection(raw: &str) -> bool {
+    INJECT.is_match(&decode_uri(raw))
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Request {
     pub ip: String,
@@ -58,6 +110,8 @@ pub struct Request {
     pub host: Option<String>,
     /// The raw path looks like a scanner probe.
     pub scan: bool,
+    /// The path or query carries an injection payload (SQL, script, command, traversal).
+    pub inject: bool,
 }
 
 fn clean_path(raw: &str) -> (String, bool) {
@@ -134,6 +188,7 @@ fn parse_json(line: &str) -> Option<Request> {
         _ => return None,
     };
     let (path, scan) = clean_path(&raw);
+    let inject = is_injection(&raw);
     Some(Request {
         ip: j.remote_addr?,
         method,
@@ -147,6 +202,7 @@ fn parse_json(line: &str) -> Option<Request> {
             .filter(|h| !h.is_empty() && h != "-")
             .map(|h| h.to_ascii_lowercase()),
         scan,
+        inject,
     })
 }
 
@@ -157,7 +213,8 @@ pub fn parse(line: &str) -> Option<Request> {
         return parse_json(t);
     }
     let c = LINE.captures(line)?;
-    let (path, scan) = clean_path(c.get(3)?.as_str());
+    let raw = c.get(3)?.as_str();
+    let (path, scan) = clean_path(raw);
     let (rt_ms, host) = c.get(7).map_or((None, None), |m| parse_extra(m.as_str()));
     Some(Request {
         ip: c.get(1)?.as_str().to_string(),
@@ -172,6 +229,7 @@ pub fn parse(line: &str) -> Option<Request> {
             .filter(|u| !u.is_empty() && u != "-"),
         host,
         scan,
+        inject: is_injection(raw),
     })
 }
 
@@ -275,6 +333,9 @@ pub struct IpAgg {
     pub s4xx: u64,
     pub s5xx: u64,
     pub scan: u64,
+    /// Missing in summaries persisted before injection detection existed.
+    #[serde(default)]
+    pub inject: u64,
 }
 
 #[derive(Default)]
@@ -327,6 +388,7 @@ pub struct IpStat {
     pub requests: u64,
     pub s4xx: u64,
     pub scan: u64,
+    pub inject: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -361,7 +423,7 @@ pub struct AccessStats {
     pub slow_paths: Vec<PathStat>,
     pub top_hosts: Vec<Count>,
     pub user_agents: Vec<Count>,
-    /// Addresses probing scanner paths or getting mostly 4xx.
+    /// Addresses sending injection payloads, probing scanner paths or getting mostly 4xx.
     pub suspicious: Vec<IpStat>,
 }
 
@@ -428,6 +490,7 @@ impl Access {
         ip.s4xx += u64::from(class == 2);
         ip.s5xx += u64::from(class == 3);
         ip.scan += u64::from(r.scan);
+        ip.inject += u64::from(r.inject);
         if let Some(h) = &r.host {
             *bump(&mut m.hosts, h) += 1;
         }
@@ -534,6 +597,7 @@ impl Agg {
             e.s4xx += v.s4xx;
             e.s5xx += v.s5xx;
             e.scan += v.scan;
+            e.inject += v.inject;
         }
         for (k, v) in hosts {
             *self.hosts.entry(k.to_string()).or_default() += v;
@@ -601,24 +665,29 @@ impl Agg {
             e.s4xx += v.s4xx;
             e.s5xx += v.s5xx;
             e.scan += v.scan;
+            e.inject += v.inject;
         }
         let ip_stat = |(ip, v): (String, IpAgg)| IpStat {
             ip,
             requests: v.requests,
             s4xx: v.s4xx,
             scan: v.scan,
+            inject: v.inject,
         };
         let mut suspicious: Vec<IpStat> = by_ip
             .iter()
             .filter(|(k, v)| {
                 k.as_str() != OTHER
-                    && (v.scan >= 5 || (v.requests >= 50 && v.s4xx * 2 >= v.requests))
+                    && (v.inject > 0
+                        || v.scan >= 5
+                        || (v.requests >= 50 && v.s4xx * 2 >= v.requests))
             })
             .map(|(k, v)| ip_stat((k.clone(), *v)))
             .collect();
         suspicious.sort_by(|a, b| {
-            b.scan
-                .cmp(&a.scan)
+            b.inject
+                .cmp(&a.inject)
+                .then(b.scan.cmp(&a.scan))
                 .then(b.s4xx.cmp(&a.s4xx))
                 .then(a.ip.cmp(&b.ip))
         });
@@ -704,6 +773,41 @@ mod tests {
         assert!(parse("garbage").is_none());
         // short combined without referer/ua still parses
         assert!(parse(r#"10.0.0.1 - - [x] "GET / HTTP/1.1" 200 1"#).is_some());
+    }
+
+    #[test]
+    fn detects_injection_payloads() {
+        for raw in [
+            "/item.php?id=1%27%20UNION%20SELECT%20user,pass%20FROM%20users--",
+            "/item.php?id=1+union+all+select+1,2,3",
+            "/login?user=admin%27+or+%271%27%3D%271",
+            "/p?id=1%20AND%201=1",
+            "/p?id=1%2527%2520or%25201%253D1", // double-encoded
+            "/p?id=1;select%20pg_sleep(5)",
+            "/p?id=sleep(5)",
+            "/search?q=%3Cscript%3Ealert(1)%3C/script%3E",
+            "/p?u=%24%7Bjndi:ldap://x/a%7D",
+            "/download?file=../../../etc/passwd",
+        ] {
+            assert!(is_injection(raw), "{raw}");
+        }
+        for raw in [
+            "/",
+            "/search?q=rock+and+roll",
+            "/blog/union-station-select-menu",
+            "/api/items?sort=created_at&order=desc&page=2",
+            "/p?q=it%27s+fine",
+            "/static/app.3f2a.js",
+            "/docs/or-1-2",
+        ] {
+            assert!(!is_injection(raw), "{raw}");
+        }
+        let r = parse(
+            r#"10.0.0.7 - - [x] "GET /p?id=1%27%20or%201=1-- HTTP/1.1" 200 10 "-" "Mozilla/5.0""#,
+        )
+        .unwrap();
+        assert!(r.inject && !r.scan);
+        assert_eq!(r.path, "/p");
     }
 
     #[test]

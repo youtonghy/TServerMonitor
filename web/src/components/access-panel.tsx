@@ -139,6 +139,7 @@ function AccessView({ stats: s, long }: { stats: AccessStats; long: boolean }) {
                       <div className={styles.between}>
                         <code className={styles.code}>{ip.ip}</code>
                         <span className={styles.row}>
+                          {(ip.inject ?? 0) > 0 && <Badge size="sm" tone="danger">注入 {formatNumber(ip.inject ?? 0)}</Badge>}
                           {(ip.scan ?? 0) > 0 && <Badge size="sm" tone="danger">扫描 {formatNumber(ip.scan ?? 0)}</Badge>}
                           <span className={`${styles.num} ${styles.muted}`}>4xx {formatNumber(ip.s4xx ?? 0)} / {formatNumber(ip.requests)}</span>
                         </span>

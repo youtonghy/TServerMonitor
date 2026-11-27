@@ -1040,7 +1040,7 @@ export const mockApi: Api = {
         ],
         top_hosts: [{ key: "shop.example.com", requests: Math.round(requests * 0.8) }, { key: "api.example.com", requests: Math.round(requests * 0.2) }],
         user_agents: [{ key: "browser", requests: Math.round(requests * 0.72) }, { key: "bot", requests: Math.round(requests * 0.14) }, { key: "tool", requests: Math.round(requests * 0.13) }, { key: "scanner", requests: Math.round(requests * 0.01) }],
-        suspicious: [{ ip: "192.0.2.66", requests: 212, s4xx: 205, scan: 190 }],
+        suspicious: [{ ip: "198.51.100.9", requests: 14, s4xx: 0, scan: 0, inject: 6 }, { ip: "192.0.2.66", requests: 212, s4xx: 205, scan: 190 }],
       },
     }, 250);
   },

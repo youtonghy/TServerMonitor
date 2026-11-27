@@ -241,11 +241,11 @@ export interface AccessStats {
   top_hosts?: { key: string; requests: number }[];
   /** browser | bot | tool | scanner | empty | other */
   user_agents?: { key: string; requests: number }[];
-  /** Addresses probing scanner paths or getting mostly 4xx. */
+  /** Addresses sending injection payloads, probing scanner paths or getting mostly 4xx. */
   suspicious?: AccessIp[];
 }
 export interface AccessPath { path: string; requests: number; s5xx: number; avg_ms?: number | null }
-export interface AccessIp { ip: string; requests: number; s4xx?: number; scan?: number }
+export interface AccessIp { ip: string; requests: number; s4xx?: number; scan?: number; inject?: number }
 export type AccessRange = "1h" | "6h" | "24h" | "7d" | "30d";
 export interface AccessResponse { sources: string[]; stats: AccessStats }
 
