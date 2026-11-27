@@ -1189,6 +1189,7 @@ async fn stream(
     State(state): State<Shared>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let rx = state.events.subscribe();
+    let stopping = async move { state.shutdown_requested().await };
     let s = BroadcastStream::new(rx).filter_map(|ev| {
         // lagging subscribers just skip missed events
         let ev = ev.ok()?;
@@ -1196,6 +1197,8 @@ async fn stream(
             .event(ev.name())
             .data(ev.data().to_string())))
     });
+    // an open dashboard would otherwise keep graceful shutdown waiting forever
+    let s = futures::StreamExt::take_until(s, stopping);
     Sse::new(s).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
@@ -1849,6 +1852,25 @@ mod tests {
         let s = r.status().as_u16();
         let v: Value = r.json().await.unwrap_or(Value::Null);
         (s, v["code"].as_str().unwrap_or_default().to_string())
+    }
+
+    #[tokio::test]
+    async fn event_stream_ends_on_shutdown() {
+        let a = app(|_| {}).await;
+        let cookie = admin(&a).await;
+        let r = reqwest::Client::new()
+            .get(format!("{}/api/v1/stream", a.base))
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        a.state.request_shutdown();
+        // the body only completes when the server ends the stream
+        tokio::time::timeout(Duration::from_secs(5), r.text())
+            .await
+            .expect("SSE stream still open after shutdown")
+            .unwrap();
     }
 
     #[tokio::test]

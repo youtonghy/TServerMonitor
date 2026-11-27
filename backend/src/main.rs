@@ -187,16 +187,30 @@ async fn run(cfg: config::Config) -> Result<()> {
         .await
         .with_context(|| format!("binding {}", cfg.server.bind))?;
     tracing::info!("dashboard on http://{}", cfg.server.bind);
-    axum::serve(
+    let server = axum::serve(
         listener,
-        api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        api::router(state.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown())
-    .await?;
+    .with_graceful_shutdown(shutdown(state.clone()))
+    .into_future();
+    let grace_over = async {
+        state.shutdown_requested().await;
+        tokio::time::sleep(SHUTDOWN_GRACE).await;
+    };
+    tokio::select! {
+        r = server => r?,
+        () = grace_over => tracing::warn!(
+            "requests still open {}s after the shutdown signal; exiting anyway",
+            SHUTDOWN_GRACE.as_secs()
+        ),
+    }
     Ok(())
 }
 
-async fn shutdown() {
+/// How long in-flight requests may take to finish after SIGTERM (systemd kills at 90s).
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn shutdown(state: state::Shared) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -214,4 +228,5 @@ async fn shutdown() {
         () = term => {},
     }
     tracing::info!("shutting down");
+    state.request_shutdown();
 }

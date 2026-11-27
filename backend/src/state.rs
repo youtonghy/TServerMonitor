@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::Serialize;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use crate::agent::AgentManager;
 use crate::config::Config;
@@ -43,6 +43,8 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     pub db: Db,
     pub events: broadcast::Sender<Event>,
+    /// Flips to true once the daemon starts shutting down; see [`AppState::shutdown_requested`].
+    pub shutdown: watch::Sender<bool>,
     pub live: RwLock<Live>,
     pub started_at: i64,
     pub notifier: Notifier,
@@ -63,6 +65,7 @@ impl AppState {
             cfg,
             db,
             events,
+            shutdown: watch::channel(false).0,
             live: RwLock::new(Live::default()),
             started_at: now_ms(),
             notifier,
@@ -79,6 +82,18 @@ impl AppState {
 
     pub fn agent(&self) -> Option<&Arc<AgentManager>> {
         self.agent.get()
+    }
+
+    /// Starts the shutdown: long-lived responses (the SSE stream) end so the server can drain.
+    pub fn request_shutdown(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    /// Resolves once [`AppState::request_shutdown`] was called.
+    pub async fn shutdown_requested(&self) {
+        let mut rx = self.shutdown.subscribe();
+        // the sender lives in self, so the channel cannot close while we wait
+        let _ = rx.wait_for(|stopping| *stopping).await;
     }
 
     pub fn emit(&self, ev: Event) {
