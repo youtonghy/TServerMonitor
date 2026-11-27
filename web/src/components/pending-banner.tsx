@@ -63,7 +63,7 @@ export function PendingBanner() {
           <div className={styles.bannerText}>
             <span className={styles.bannerTitle}>待确认的{DOMAIN[p.domain] ?? p.domain}变更：{p.summary}</span>
             <span className={styles.bannerHint}>
-              <span className={styles.countdown}>{left(p.deadline, now)}</span> 后自动回滚{p.via === "mcp" ? " · 由外部 Agent 发起" : ""}。确认前请新开一个 SSH 会话，确认仍能登录。
+              <span className={styles.countdown}>{left(p.deadline, now)}</span> 后自动回滚{p.via === "mcp" ? " · 由外部 Agent 发起" : p.via === "agent" ? " · 由内置 Agent 发起（已批准）" : ""}。确认前请新开一个 SSH 会话，确认仍能登录。
             </span>
           </div>
           <div className={styles.bannerActions}>

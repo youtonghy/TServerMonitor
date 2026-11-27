@@ -5,6 +5,7 @@ import type {
   StatusResponse, TriggerResponse,
   AccessRange, AccessStats, AuditEntry, OpsCapabilities, OpsJob, OpsRead, PendingChange, SshSession,
   AccountUser, ApiTokenRecord, AuthState, AuthUser, SessionView,
+  ApprovalMode, ApprovalPolicy, ApprovalsResponse, ChangeRequest, ChangeRequestStatus, ReportConversations,
 } from "./types";
 
 export const MOCK = import.meta.env.VITE_MOCK === "1";
@@ -125,6 +126,7 @@ export interface Api {
   reports(kind?: ReportKind | "", limit?: number): Promise<ReportSummary[]>;
   latestReport(kind?: ReportKind): Promise<Report>;
   report(id: number): Promise<Report>;
+  reportConversations(id: number): Promise<ReportConversations>;
   agentRuns(limit?: number): Promise<AgentRun[]>;
   agentRun(id: string): Promise<AgentRunDetail>;
   trigger(kind: ReportKind): Promise<TriggerResponse>;
@@ -171,6 +173,14 @@ export interface Api {
   opsJob(id: number): Promise<OpsJob>;
   opsAudit(limit?: number): Promise<AuditEntry[]>;
   opsPending(): Promise<PendingChange[]>;
+  approvals(status?: "open" | "all" | ChangeRequestStatus, limit?: number): Promise<ApprovalsResponse>;
+  approval(id: number): Promise<ChangeRequest>;
+  /** Asks for the password when needed. */
+  approve(id: number): Promise<ChangeRequest>;
+  reject(id: number, note?: string): Promise<ChangeRequest>;
+  approvalPolicy(): Promise<ApprovalPolicy[]>;
+  /** Asks for the password when needed. */
+  setApprovalPolicy(action: string, mode: ApprovalMode): Promise<ApprovalPolicy[]>;
   /** Helper read with local fallback, e.g. opsRead("nginx.file", { path }). */
   opsRead<T>(call: string, params?: Record<string, string>): Promise<OpsRead<T>>;
   /** Starts a change (asks for the password when needed); waits up to ~20 s and returns the job. */
@@ -214,6 +224,7 @@ const httpApi: Api = {
   reports: (kind = "", limit = 50) => request(`/reports${query({ kind, limit })}`),
   latestReport: kind => request(`/reports/latest${query({ kind })}`),
   report: id => request(`/reports/${id}`),
+  reportConversations: id => request(`/reports/${id}/conversations`),
   agentRuns: (limit = 50) => request(`/agent/runs${query({ limit })}`),
   agentRun: id => request(`/agent/runs/${encodeURIComponent(id)}`),
   trigger: kind => request("/agent/trigger", { method: "POST", body: JSON.stringify({ kind }) }),
@@ -260,6 +271,12 @@ const httpApi: Api = {
   opsJob: id => request(`/ops/jobs/${id}`),
   opsAudit: (limit = 100) => request(`/ops/audit${query({ limit })}`),
   opsPending: () => request("/ops/pending"),
+  approvals: (status = "open", limit = 100) => request(`/approvals${query({ status, limit })}`),
+  approval: id => request(`/approvals/${id}`),
+  approve: id => withSudo(() => request(`/approvals/${id}/approve`, { method: "POST" })),
+  reject: (id, note) => request(`/approvals/${id}/reject`, json("POST", { note: note ?? null })),
+  approvalPolicy: () => request("/approvals/policy"),
+  setApprovalPolicy: (action, mode) => withSudo(() => request(`/approvals/policy/${encodeURIComponent(action)}`, json("PUT", { mode }))),
   opsRead: <T,>(call: string, params: Record<string, string> = {}) => request<OpsRead<T>>(`/ops/read/${encodeURIComponent(call)}${query(params)}`),
   opsRun,
   sshSessions: () => request("/ssh/sessions"),

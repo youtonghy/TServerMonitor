@@ -7,7 +7,8 @@ import SegmentedControl from "@/components/arc/segmented-control/segmented-contr
 import { Textarea } from "@/components/arc/textarea/textarea";
 import { ApiError, api } from "@/api/client";
 import { useStreamEvent } from "@/api/live";
-import type { AgentRunDetail, AgentStep, Conversation, ConversationContext } from "@/api/types";
+import type { AgentRunDetail, AgentStep, Conversation, ConversationContext, ReportSection } from "@/api/types";
+import { ChangeRequestCard } from "@/components/change-requests";
 import { useQuery } from "@/api/useQuery";
 import { PageHeader, Panel, QueryView, Section, errorMessage, useNow } from "@/components/panel";
 import { formatDateTime, formatElapsed, formatRelative } from "@/lib/format";
@@ -135,7 +136,7 @@ function Composer({ busy, disabled, onSend, onCancel, placeholder }: {
         rows={3}
         maxLength={8000}
         disabled={disabled}
-        description="Ctrl/⌘ + Enter 发送。Agent 只能读取数据和给出建议，不会修改服务器。"
+        description="Ctrl/⌘ + Enter 发送。Agent 不会直接修改服务器；需要改动时会提交变更申请，由你批准后才执行。"
       />
       <div className={local.composerActions}>
         {busy && onCancel && <Button type="button" variant="ghost" onClick={onCancel}>停止</Button>}
@@ -196,6 +197,10 @@ function ConversationView({ id, now, onDeleted }: { id: string; now: number; onD
     if (step.kind === "message") setStreams(s => omit(s, event.run_id));
   });
 
+  useStreamEvent("approval", () => {
+    if (detail.data?.requests?.length || detail.data?.runs.some(r => r.status === "running")) detail.reload();
+  });
+
   useStreamEvent("agent_delta", event => {
     if (event.conversation_id !== id) return;
     setStreams(s => ({ ...s, [event.run_id]: (s[event.run_id] ?? "") + event.text }));
@@ -250,10 +255,18 @@ function ConversationView({ id, now, onDeleted }: { id: string; now: number; onD
           <div className={styles.stack}>
             {data.context && <ContextNote context={data.context} />}
             <div className={local.thread} aria-live="polite">
-              {data.runs.length === 0 && <p className={styles.textSecondary}>还没有消息。</p>}
+              {data.runs.length === 0 && <p className={styles.textSecondary}>{data.queued ? "排队中，前面的对话完成后自动开始。" : "还没有消息。"}</p>}
               {data.runs.map(run => <RunBlock key={run.id} run={run} stream={streams[run.id]} now={now} />)}
               <div ref={bottom} />
             </div>
+            {data.requests && data.requests.length > 0 && (
+              <section className={styles.stack} aria-label="本对话的变更申请">
+                <h3 className={styles.subheading}>变更申请</h3>
+                <ul className={styles.list}>
+                  {data.requests.map(r => <li key={r.id}><ChangeRequestCard request={r} onChanged={() => detail.reload()} showLink={false} /></li>)}
+                </ul>
+              </section>
+            )}
             {error && <Alert tone="danger" title="发送失败" onDismiss={() => setError(null)}>{error}</Alert>}
             <Composer
               busy={running !== null}
@@ -268,8 +281,13 @@ function ConversationView({ id, now, onDeleted }: { id: string; now: number; onD
   );
 }
 
+const SECTION: Record<ReportSection, string> = { root_causes: "根因", recommendations: "建议", security_risks: "安全风险", anomalies: "异常" };
+
 function ContextNote({ context }: { context: ConversationContext }) {
-  if ("report_id" in context) return <p className={styles.textSecondary}>本对话围绕 <Link to={`/reports/${context.report_id}`}>报告 #{context.report_id}</Link></p>;
+  if ("report_id" in context) {
+    const item = context.item ? ` 的第 ${context.item.index + 1} 条${SECTION[context.item.section]}` : "";
+    return <p className={styles.textSecondary}>本对话围绕 <Link to={`/reports/${context.report_id}`}>报告 #{context.report_id}</Link>{item}</p>;
+  }
   if ("alert_id" in context) return <p className={styles.textSecondary}>本对话围绕告警 #{context.alert_id}</p>;
   if ("run_id" in context) return <p className={styles.textSecondary}>本对话围绕运行 {context.run_id}</p>;
   return <p className={styles.textSecondary}>本对话附带了一份上下文资料</p>;

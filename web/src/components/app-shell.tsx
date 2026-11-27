@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Activity, Bell, Bot, BrickWall, CalendarClock, ClipboardList, Globe, LogOut, MonitorPlay, PackageCheck, Boxes, FileText, LayoutDashboard, ScrollText, Settings, ShieldCheck, Terminal, TrendingUp, type LucideIcon } from "lucide-react";
+import { Activity, Bell, Bot, BrickWall, CalendarClock, ClipboardCheck, ClipboardList, Globe, LogOut, MonitorPlay, PackageCheck, Boxes, FileText, LayoutDashboard, ScrollText, Settings, ShieldCheck, Terminal, TrendingUp, type LucideIcon } from "lucide-react";
 import { Badge } from "@/components/arc/badge/badge";
 import { Button } from "@/components/arc/button/button";
 import { ThemeSwitch } from "@/components/arc/theme-switch/theme-switch";
@@ -9,6 +9,7 @@ import { useConnection, type ConnectionState } from "@/api/live";
 import { Link, useRoute } from "@/lib/router";
 import { useTheme } from "@/lib/theme";
 import { useAuth } from "./auth-context";
+import { ApprovalBanner, usePendingApprovals } from "./change-requests";
 import { PendingBanner } from "./pending-banner";
 import styles from "./app-shell.module.css";
 
@@ -43,6 +44,7 @@ export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { to: "/reports", label: "报告", icon: FileText, match: "reports" },
       { to: "/agent", label: "Agent", icon: Bot, match: "agent" },
       { to: "/tasks", label: "自动任务", icon: CalendarClock, match: "tasks" },
+      { to: "/approvals", label: "变更审批", icon: ClipboardCheck, match: "approvals" },
     ],
   },
   { label: "系统", items: [{ to: "/settings", label: "设置", icon: Settings, match: "settings" }] },
@@ -58,6 +60,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const connection = useConnection();
   const { user, logout } = useAuth();
   const active = route.segments[0] ?? "";
+  const approvals = usePendingApprovals();
 
   return (
     <div className={styles.shell}>
@@ -79,6 +82,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                       <Link to={item.to} className={styles.navLink} aria-current={current ? "page" : undefined}>
                         <Icon size={16} strokeWidth={1.75} aria-hidden="true" />
                         <span>{item.label}</span>
+                        {item.match === "approvals" && approvals > 0 && <span className={styles.navCount}><Badge size="sm" tone="warning" aria-label={`${approvals} 个待批准`}>{approvals}</Badge></span>}
                       </Link>
                     </li>
                   );
@@ -107,6 +111,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <main className={styles.main}>
         <div className={styles.page}>
           <PendingBanner />
+          <ApprovalBanner count={approvals} />
           {children}
         </div>
       </main>

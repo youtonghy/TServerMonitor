@@ -123,7 +123,15 @@ export interface AgentStep {
 }
 export type AgentRunDetail = AgentRun & { steps: AgentStep[] };
 
-export type ConversationContext = { report_id: number } | { alert_id: number } | { run_id: string } | { text: string };
+export type ReportSection = "root_causes" | "recommendations" | "security_risks" | "anomalies";
+/** What a conversation about one report item is for. */
+export type ItemIntent = "explain" | "ask" | "fix";
+export interface ReportItemRef { section: ReportSection; index: number }
+export type ConversationContext =
+  | { report_id: number; item?: ReportItemRef; intent?: ItemIntent }
+  | { alert_id: number }
+  | { run_id: string }
+  | { text: string };
 export interface Conversation {
   id: string; title: string;
   /** "chat" for user conversations, otherwise the kind of the scheduled run that created it. */
@@ -132,7 +140,39 @@ export interface Conversation {
   created_at: number; updated_at: number;
   last_status: AgentRunStatus | null; runs: number;
 }
-export type ConversationDetail = Omit<Conversation, "runs"> & { runs: AgentRunDetail[] };
+export type ConversationDetail = Omit<Conversation, "runs"> & {
+  runs: AgentRunDetail[];
+  /** A message is waiting for a free conversation slot. */
+  queued?: boolean;
+  /** Change requests the agent filed in this conversation. */
+  requests?: ChangeRequest[];
+};
+export interface ReportConversation extends Conversation { queued: boolean }
+export interface ReportConversations { conversations: ReportConversation[]; requests: ChangeRequest[] }
+
+// Change requests filed by agents (built-in or MCP)
+
+export type ChangeRequestStatus = "pending" | "approved" | "rejected" | "expired" | "executed" | "failed";
+export type ApprovalMode = "approve" | "auto";
+export interface ChangeRequest {
+  id: number; action: string; label: string; kind: "host" | "panel" | null; summary: string;
+  /** Redacted for display. */
+  args: unknown;
+  reason: string; source: "agent" | "mcp" | string; actor: string | null; remote: string | null;
+  conversation_id: string | null; run_id: string | null;
+  mode: ApprovalMode; status: ChangeRequestStatus;
+  /** Dry run of a host change: { job_id, status, result, log, error }. */
+  preview: { job_id?: number; status?: string; error?: string | null; result?: Record<string, unknown> | null; log?: string } | null;
+  result: unknown | null; error: string | null; job_id: number | null;
+  created_at: number; expires_at: number; decided_at: number | null; decided_by: string | null; note: string | null;
+  finished_at: number | null;
+}
+export interface ApprovalsResponse { requests: ChangeRequest[]; pending: number }
+export interface ApprovalPolicy {
+  action: string; label: string; kind: "host" | "panel"; default: ApprovalMode; mode: ApprovalMode;
+  /** The built-in agent may ask for it. */
+  agent: boolean;
+}
 export interface NewConversation { title?: string; context?: ConversationContext; message?: string }
 
 // Endpoint payloads
@@ -308,6 +348,7 @@ export interface StreamEventMap {
   package_job: { id: number; status: PackageJob["status"]; line: string | null };
   ops_job: { id: number; status: OpsJob["status"]; line: string | null };
   ops_pending: PendingChange[];
+  approval: { id: number; status: ChangeRequestStatus };
 }
 export type StreamEventName = keyof StreamEventMap;
 

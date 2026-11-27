@@ -9,6 +9,7 @@ import type {
   Diagnosis, Finding, HostMetrics, LogCluster, LogRatesResponse, LogSource, MetricPoint, MetricsRange, ModeState,
   PortInfo, Report, ReportKind, ReportSummary, Snapshot, StreamEventMap, StreamEventName,
 } from "./types";
+import type { ApprovalMode, ApprovalPolicy, ChangeRequest } from "./types";
 import type { Conversation, ConversationDetail, NotifyChannel, PackageJob, PackageOp, PackagesResponse, Prompt, Provider, ResolvedModel, Route, RoutingResponse, SystemJob, Task } from "./types";
 
 const GiB = 1024 ** 3;
@@ -615,8 +616,115 @@ function conversationDetail(id: string): ConversationDetail | null {
   const conv = conversationList("").find(c => c.id === id);
   if (!conv) return null;
   const rs = runs.filter(r => (r.run.conversation_id ?? `c_${r.run.id}`) === id).sort((a, b) => a.run.started_at - b.run.started_at);
-  return { ...conv, runs: rs.map(r => ({ ...r.run, steps: r.steps.map(s => ({ ...s })) })) };
+  return {
+    ...conv, runs: rs.map(r => ({ ...r.run, steps: r.steps.map(s => ({ ...s })) })),
+    queued: false, requests: changeRequests.filter(c => c.conversation_id === id),
+  };
 }
+
+// Change requests filed by agents
+
+const POLICY_DEFAULTS: Omit<ApprovalPolicy, "mode">[] = [
+  { action: "docker.container", label: "容器启停/删除", kind: "host", default: "approve", agent: true },
+  { action: "nginx.test", label: "检查 nginx 配置（nginx -t）", kind: "host", default: "auto", agent: true },
+  { action: "nginx.write", label: "修改 nginx 配置文件", kind: "host", default: "approve", agent: true },
+  { action: "nginx.reload", label: "重新加载 nginx", kind: "host", default: "approve", agent: true },
+  { action: "firewall.add", label: "添加防火墙规则", kind: "host", default: "approve", agent: true },
+  { action: "ssh.set", label: "修改 sshd 设置", kind: "host", default: "approve", agent: true },
+  { action: "pending.revert", label: "撤销待确认的防火墙/SSH 变更", kind: "host", default: "auto", agent: true },
+  { action: "packages.job", label: "刷新索引或升级软件包", kind: "host", default: "approve", agent: true },
+  { action: "packages.check", label: "检查软件包更新（只读）", kind: "panel", default: "auto", agent: true },
+  { action: "alert.ack", label: "确认告警", kind: "panel", default: "auto", agent: true },
+  { action: "alert.silence", label: "静默告警", kind: "panel", default: "auto", agent: true },
+  { action: "analysis.trigger", label: "触发一次 AI 分析", kind: "panel", default: "auto", agent: true },
+  { action: "agent.ask", label: "让内置 Agent 分析一个问题", kind: "panel", default: "auto", agent: false },
+  { action: "task.create", label: "新建定时任务", kind: "panel", default: "approve", agent: true },
+  { action: "task.delete", label: "删除定时任务", kind: "panel", default: "approve", agent: true },
+  { action: "prompt.update", label: "修改提示词", kind: "panel", default: "approve", agent: true },
+];
+const policyOverrides = new Map<string, ApprovalMode>();
+const policies = (): ApprovalPolicy[] => POLICY_DEFAULTS.map(p => ({ ...p, mode: policyOverrides.get(p.action) ?? p.default }));
+
+const NGINX_DIFF = "--- a/sites-available/wordpress\n+++ b/sites-available/wordpress\n@@ -1,3 +1,6 @@\n+limit_req_zone $binary_remote_addr zone=wp:10m rate=20r/s;\n server {\n     listen 80;\n+    limit_req zone=wp burst=40 nodelay;\n+    location ~ /\\.(env|git|svn) { return 444; }\n";
+
+const changeRequests: ChangeRequest[] = [
+  {
+    id: 3, action: "firewall.add", label: "添加防火墙规则", kind: "host", summary: "添加防火墙规则 deny 22/tcp 来自 10.10.10.10",
+    args: { action: "deny", port: "22", proto: "tcp", from: "10.10.10.10" },
+    reason: "10.10.10.10 过去一小时对 SSH 爆破 143 次，且同时在扫描站点，先在防火墙层面封禁该来源。", source: "mcp", actor: "token:ops-bot", remote: "127.0.0.1",
+    conversation_id: null, run_id: null, mode: "approve", status: "pending",
+    preview: { job_id: 41, status: "succeeded", error: null, result: { plan: ["ufw insert 1 deny proto tcp from 10.10.10.10 to any port 22"] }, log: "dry run: ufw insert 1 deny proto tcp from 10.10.10.10 to any port 22" },
+    result: null, error: null, job_id: null, created_at: Date.now() - 4 * MIN, expires_at: Date.now() + 26 * MIN,
+    decided_at: null, decided_by: null, note: null, finished_at: null,
+  },
+  {
+    id: 2, action: "alert.ack", label: "确认告警", kind: "panel", summary: "确认告警 #12", args: { id: 12 },
+    reason: "已确认是计划内的备份任务导致的磁盘 IO 峰值。", source: "mcp", actor: "token:ops-bot", remote: "127.0.0.1",
+    conversation_id: null, run_id: null, mode: "auto", status: "executed", preview: null, result: { id: 12 }, error: null, job_id: null,
+    created_at: Date.now() - 3 * HOUR, expires_at: Date.now() - 2 * HOUR, decided_at: Date.now() - 3 * HOUR, decided_by: "auto", note: null, finished_at: Date.now() - 3 * HOUR,
+  },
+];
+
+function fileRequest(conversationId: string, runId: string): ChangeRequest {
+  const id = Math.max(0, ...changeRequests.map(c => c.id)) + 1;
+  const req: ChangeRequest = {
+    id, action: "nginx.write", label: "修改 nginx 配置文件", kind: "host", summary: "修改 nginx 配置 sites-available/wordpress",
+    args: { path: "sites-available/wordpress", content: { bytes: 1840, sha256: "9f2c…" }, base_sha256: "51ab…" },
+    reason: "10.10.10.10 两分钟内 9680 次请求打满 php-fpm 工作池；在站点加 limit_req 限流，并对 /.env、/.git 等扫描路径直接返回 444。",
+    source: "agent", actor: `agent:${conversationId}`, remote: null, conversation_id: conversationId, run_id: runId,
+    mode: policyOverrides.get("nginx.write") ?? "approve", status: "pending",
+    preview: { job_id: 50 + id, status: "succeeded", error: null, result: { diff: NGINX_DIFF }, log: "nginx -t: syntax is ok" },
+    result: null, error: null, job_id: null, created_at: Date.now(), expires_at: Date.now() + 30 * MIN,
+    decided_at: null, decided_by: null, note: null, finished_at: null,
+  };
+  changeRequests.unshift(req);
+  emit("approval", { id, status: "pending" });
+  return req;
+}
+
+const approvalsApi: Pick<Api, "approvals" | "approval" | "approve" | "reject" | "approvalPolicy" | "setApprovalPolicy" | "reportConversations"> = {
+  approvals: (status = "open", limit = 100) => {
+    const now = Date.now();
+    for (const c of changeRequests) if (c.status === "pending" && c.expires_at <= now) Object.assign(c, { status: "expired", finished_at: now });
+    const list = changeRequests.filter(c => status === "all" || (status === "open" ? c.status === "pending" : c.status === status));
+    return delay({ requests: list.slice(0, limit), pending: changeRequests.filter(c => c.status === "pending").length });
+  },
+  approval: id => {
+    const c = changeRequests.find(x => x.id === id);
+    return c ? delay(c) : Promise.reject(new ApiError(404, "change request not found"));
+  },
+  approve: id => sudoGate(null).then(() => {
+    const c = changeRequests.find(x => x.id === id);
+    if (!c || c.status !== "pending" || c.expires_at <= Date.now()) return Promise.reject(new ApiError(400, "申请不存在、已处理或已过期"));
+    Object.assign(c, { status: "approved", decided_at: Date.now(), decided_by: "admin" });
+    emit("approval", { id, status: "approved" });
+    setTimeout(() => {
+      Object.assign(c, { status: "executed", finished_at: Date.now(), job_id: 90 + id, result: { job_id: 90 + id, status: "succeeded", log: "nginx -t ok, reloaded, probe ok" } });
+      emit("approval", { id, status: "executed" });
+      if (c.conversation_id) simulateChat(c.conversation_id, `【系统通知】变更申请 #${id}（${c.summary}）已由 admin 批准，已执行成功。请用只读工具确认实际效果。`);
+    }, 1500);
+    return delay({ ...c });
+  }),
+  reject: (id, note) => {
+    const c = changeRequests.find(x => x.id === id);
+    if (!c || c.status !== "pending") return Promise.reject(new ApiError(400, "申请不存在或已处理"));
+    Object.assign(c, { status: "rejected", decided_at: Date.now(), decided_by: "admin", note: note?.trim() || null, finished_at: Date.now() });
+    emit("approval", { id, status: "rejected" });
+    return delay({ ...c });
+  },
+  approvalPolicy: () => delay(policies()),
+  setApprovalPolicy: (action, mode) => sudoGate(null).then(() => {
+    const p = POLICY_DEFAULTS.find(x => x.action === action);
+    if (!p) return Promise.reject(new ApiError(400, `未知的操作 ${action}`));
+    if (mode === p.default) policyOverrides.delete(action); else policyOverrides.set(action, mode);
+    return delay(policies());
+  }),
+  reportConversations: id => {
+    const list = conversationList("chat").filter(c => c.context && "report_id" in c.context && c.context.report_id === id);
+    const ids = new Set(list.map(c => c.id));
+    return delay({ conversations: list.map(c => ({ ...c, queued: false })), requests: changeRequests.filter(c => c.conversation_id && ids.has(c.conversation_id)) });
+  },
+};
 
 const ANSWER = "根据最近一小时的数据：CPU 平均 41%，内存 68%，没有持续超过阈值的指标。\n\n值得注意的是 php-error 日志的错误率是基线的 8 倍，主要模板是 `PDOException: SQLSTATE[HY000] [2002]`，说明应用连不上数据库。建议先检查 mysql 容器状态和连接数上限。";
 
@@ -636,6 +744,15 @@ function simulateChat(conversationId: string, text: string): string {
   step("user", { text });
   setTimeout(() => step("tool_call", { tool: "get_host_metrics", input: { range: "1h" } }), 600);
   setTimeout(() => step("tool_result", { tool: "get_host_metrics", output: { cpu_avg: 41.2, mem_avg: 68.4 } }), 900);
+  const fixing = chat?.context && "intent" in chat.context && chat.context.intent === "fix" && !text.startsWith("【系统通知】");
+  if (fixing) {
+    const input = { action: "nginx.write", args: { path: "sites-available/wordpress" }, reason: "限流并屏蔽扫描路径" };
+    setTimeout(() => step("tool_call", { tool: "propose_change", input }), 1000);
+    setTimeout(() => {
+      const req = fileRequest(conversationId, id);
+      step("tool_result", { tool: "propose_change", output: { request_id: req.id, status: req.status, summary: req.summary, needs_approval: true } });
+    }, 1150);
+  }
   const parts = ANSWER.match(/.{1,6}/gsu) ?? [ANSWER];
   parts.forEach((part, i) => setTimeout(() => {
     if (record.run.status !== "running") return;
@@ -834,6 +951,7 @@ const authApi: Pick<Api, "authState" | "setup" | "login" | "logout" | "sudo" | "
 export const mockApi: Api = {
   ...opsMock(emit),
   ...authApi,
+  ...approvalsApi,
   status: () => delay({
     version: "0.1.0-dev", platform: "linux-x86_64", started_at: BOOT - 2 * DAY, mode: { ...mode }, ai: { ...ai },
     collectors: {

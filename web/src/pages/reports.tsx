@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Alert } from "@/components/arc/alert/alert";
 import { Badge } from "@/components/arc/badge/badge";
 import { Button } from "@/components/arc/button/button";
@@ -9,6 +9,7 @@ import { useStreamEvent } from "@/api/live";
 import type { Diagnosis, Priority, Report, ReportKind, ReportSummary } from "@/api/types";
 import { useQuery } from "@/api/useQuery";
 import { PageHeader, Panel, Section, errorMessage, useNow } from "@/components/panel";
+import { ItemActions, ItemDrawer, useReportThreads, type ItemRef } from "@/components/report-items";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import {
   categoryLabel, confidenceLabel, confidenceTone, dimensionLabel, findingSeverityLabel, findingSeverityTone, generatedByLabel,
@@ -159,15 +160,27 @@ function AskAgent({ reportId, title }: { reportId: number; title?: string }) {
 
 function ReportDetail({ id }: { id: number }) {
   const report = useQuery(() => api.report(id), [id]);
+  const threads = useReportThreads(id);
+  const [open, setOpen] = useState<ItemRef | null>(null);
+  const actions = (section: ItemRef["section"], index: number, title: string) => (
+    <ItemActions reportId={id} item={{ section, index, title }} threads={threads} onOpen={setOpen} />
+  );
   return (
     <div className={styles.stack}>
       <Section title="报告摘要" query={report} skeletonLines={6} errorTitle="报告加载失败" actions={<AskAgent reportId={id} title={report.data?.title} />}>
         {data => <Summary report={data} />}
       </Section>
-      {report.status === "ready" && <Diagnoses body={report.data.body} />}
+      {report.status === "ready" && (
+        <>
+          <Diagnoses body={report.data.body} actions={actions} />
+          <ItemDrawer reportId={id} body={report.data.body} item={open} threads={threads} onClose={() => setOpen(null)} />
+        </>
+      )}
     </div>
   );
 }
+
+type ItemActionsSlot = (section: ItemRef["section"], index: number, title: string) => ReactNode;
 
 function Summary({ report }: { report: Report }) {
   return (
@@ -190,7 +203,7 @@ function Summary({ report }: { report: Report }) {
 
 const PRIORITIES: Priority[] = ["high", "medium", "low"];
 
-function Diagnoses({ body }: { body: Diagnosis }) {
+function Diagnoses({ body, actions }: { body: Diagnosis; actions: ItemActionsSlot }) {
   return (
     <>
       <Panel title="健康维度" description="各维度 0 到 100 分，越高越健康">
@@ -215,6 +228,7 @@ function Diagnoses({ body }: { body: Diagnosis }) {
                   <Badge size="sm" tone={confidenceTone[cause.confidence]}>{confidenceLabel[cause.confidence]}</Badge>
                 </div>
                 <p className={styles.textSecondary}>证据：{cause.evidence}</p>
+                {actions("root_causes", i, cause.title)}
               </li>
             ))}
           </ul>
@@ -229,14 +243,15 @@ function Diagnoses({ body }: { body: Diagnosis }) {
             <section key={priority} className={styles.stack} aria-label={priorityLabel[priority]}>
               <h3 className={styles.subheading}><Badge size="sm" tone={priorityTone[priority]}>{priorityLabel[priority]}</Badge></h3>
               <ul className={styles.list}>
-                {items.map((rec, i) => (
-                  <li key={i}>
+                {items.map(rec => (
+                  <li key={body.recommendations.indexOf(rec)}>
                     <div className={styles.between}>
                       <p className={styles.itemTitle}>{rec.title}</p>
                       <Badge size="sm" outline>{categoryLabel[rec.category]}</Badge>
                     </div>
                     <p className={styles.text}>{rec.detail}</p>
                     <p className={styles.textSecondary}>预期效果：{rec.expected_impact}</p>
+                    {actions("recommendations", body.recommendations.indexOf(rec), rec.title)}
                   </li>
                 ))}
               </ul>
@@ -257,6 +272,7 @@ function Diagnoses({ body }: { body: Diagnosis }) {
                   </div>
                   <p className={styles.textSecondary}>{risk.detail}</p>
                   <p className={styles.text}>建议：{risk.recommendation}</p>
+                  {actions("security_risks", i, risk.title)}
                 </li>
               ))}
             </ul>
@@ -273,6 +289,7 @@ function Diagnoses({ body }: { body: Diagnosis }) {
                     <Badge size="sm" tone={severityTone[anomaly.severity]}>{severityLabel[anomaly.severity]}</Badge>
                   </div>
                   <p className={styles.textSecondary}>{anomaly.detail}</p>
+                  {actions("anomalies", i, anomaly.title)}
                 </li>
               ))}
             </ul>

@@ -28,6 +28,7 @@ const pages: Record<string, ComponentType> = {
   firewall: lazy(() => import('@/pages/firewall')),
   ssh: lazy(() => import('@/pages/ssh')),
   ops: lazy(() => import('@/pages/ops-log')),
+  approvals: lazy(() => import('@/pages/approvals')),
 }
 
 const Wall = lazy(() => import('@/pages/wall'))
