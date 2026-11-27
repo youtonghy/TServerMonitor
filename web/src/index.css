@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* Arc Pro components are git-ignored (licensed), and Tailwind skips ignored files unless registered */
+@source "./components/arc-pro";
 
 /* Arc tokens come from components/arc/foundation.css (imported in main.tsx). Fonts: Geist for display, Inter for body. */
 :root {
