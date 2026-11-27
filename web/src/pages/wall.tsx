@@ -110,6 +110,7 @@ export default function WallPage() {
 
         <div className={styles.charts}>
           <section className={styles.card} aria-label="CPU">
+            {host && <p className={styles.cardTitle}>{host.cpu_cores} 核</p>}
             <RealtimeStream points={cpu} label="CPU 使用率" unit="%" interval={interval} windowMs={interval * 60} height={200} min={0} max={100} formatValue={v => v.toFixed(1)} formatTime={t => formatTime(t)} emptyLabel="等待实时数据" />
           </section>
           <section className={styles.card} aria-label="内存">

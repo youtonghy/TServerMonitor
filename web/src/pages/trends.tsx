@@ -103,7 +103,7 @@ export default function TrendsPage() {
               categoryLabel="时间"
               emptyLabel="该时间段没有数据"
               loading={metrics.refreshing}
-              formatValue={v => `${v.toFixed(1)}%`}
+              formatValue={v => v.toFixed(1)}
               formatTick={v => `${Math.round(v)}`}
             />
           )}

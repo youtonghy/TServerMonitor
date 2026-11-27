@@ -11,10 +11,11 @@ import { formatDateTime, formatDuration, formatNumber, formatRelative } from "@/
 import { findingCategoryLabel, findingSeverityLabel, findingSeverityOrder, findingSeverityTone, lookup } from "@/lib/labels";
 import styles from "./pages.module.css";
 
+// follows the badge tones (high red, medium amber); high is a lighter red so it stays apart from critical
 const severityColor: Record<FindingSeverity, string> = {
   critical: "var(--danger)",
-  high: "var(--warning)",
-  medium: "var(--series-3)",
+  high: "color-mix(in oklch, var(--danger) 60%, var(--background))",
+  medium: "var(--warning)",
   low: "var(--series-1)",
   info: "var(--series-4)",
 };

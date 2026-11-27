@@ -129,8 +129,8 @@ export default function SshPage() {
                     <span className={`${styles.small} ${styles.muted}`}>{OPTION_HINT[o.key] ?? ""} · 当前 {cur ?? "未知"}</span>
                   </div>
                   {allowOptions && (o.values.length > 0
-                    ? <Select label={o.key} className={local.inlineSelect} value={changes[o.key] ?? cur ?? ""} onValueChange={v => setChanges(x => ({ ...x, [o.key]: v }))} options={o.values.map(v => ({ value: v, label: v }))} />
-                    : <Input label={o.key} className={local.inlineSelect} inputMode="numeric" value={changes[o.key] ?? cur ?? ""} onChange={e => setChanges(x => ({ ...x, [o.key]: e.target.value.replace(/\D/g, "") }))} />)}
+                    ? <div className={`${local.inlineSelect} ${local.optionControl}`}><Select label={o.key} value={changes[o.key] ?? cur ?? ""} onValueChange={v => setChanges(x => ({ ...x, [o.key]: v }))} options={o.values.map(v => ({ value: v, label: v }))} /></div>
+                    : <div className={`${local.inlineSelect} ${local.optionControl}`}><Input label={o.key} inputMode="numeric" value={changes[o.key] ?? cur ?? ""} onChange={e => setChanges(x => ({ ...x, [o.key]: e.target.value.replace(/\D/g, "") }))} /></div>)}
                 </li>
               );
             })}

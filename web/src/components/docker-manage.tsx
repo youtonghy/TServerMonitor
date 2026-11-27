@@ -15,6 +15,7 @@ import { formatBytes, formatDateTime } from "@/lib/format";
 import { ConfirmDialog } from "./confirm-dialog";
 import { OpsJobLog } from "./job-log";
 import { JobResult, OpsNotice, can, useOpsAction, useOpsCaps } from "./ops";
+import { containerStateLabel, containerStateTone, lookup, lookupTone } from "@/lib/labels";
 import { PageHeader, Panel, Section } from "./panel";
 import styles from "@/pages/pages.module.css";
 import local from "@/pages/settings.module.css";
@@ -64,7 +65,7 @@ export function DockerManage({ tabs }: { tabs: ReactNode }) {
     { key: "name", label: "名称", sortable: true, render: (_v, r) => <span className={styles.row}><span className={styles.strong}>{r.name}</span>{r.protected && <Badge size="sm" tone="neutral" outline>受保护</Badge>}</span> },
     { key: "image", label: "镜像", render: (_v, r) => <code className={`${styles.code} ${styles.muted}`}>{r.image}</code> },
     { key: "project", label: "项目", sortable: true },
-    { key: "state", label: "状态", sortable: true, render: (_v, r) => <span className={styles.row}><Badge size="sm" tone={r.state === "running" ? "success" : r.state === "exited" ? "neutral" : "warning"} dot>{r.state}</Badge><span className={`${styles.small} ${styles.muted}`}>{r.status}</span></span> },
+    { key: "state", label: "状态", sortable: true, render: (_v, r) => <span className={styles.row}><Badge size="sm" tone={lookupTone(containerStateTone, r.state)} dot>{lookup(containerStateLabel, r.state)}</Badge><span className={`${styles.small} ${styles.muted}`}>{r.status}</span></span> },
     {
       key: "id", label: "", render: (_v, r) => {
         const acts: Action[] = r.state === "running" ? ["restart", "stop", "kill"] : ["start", "remove"];

@@ -7,7 +7,7 @@ import { SortableDataTable, type DataColumn } from "@/components/arc/sortable-da
 import { Streamgraph, type StreamgraphDatum } from "@/components/arc/streamgraph/streamgraph";
 import { api } from "@/api/client";
 import { AccessPanel } from "@/components/access-panel";
-import type { LogCluster, LogRatesResponse, LogSource } from "@/api/types";
+import type { DailyErrorCount, LogCluster, LogRatesResponse, LogSource } from "@/api/types";
 import { useQuery } from "@/api/useQuery";
 import { PageHeader, Section, useNow } from "@/components/panel";
 import { formatCompact, formatDateTime, formatHourMinute, formatNumber, formatRelative } from "@/lib/format";
@@ -152,16 +152,15 @@ export default function LogsPage() {
           empty={{ title: "暂无历史错误", description: "守护进程运行满一天后会开始记录每日错误数。" }}
         >
           {data => (
-            <div className={styles.scrollX}>
-              <ActivityHeatmap
-                days={data}
-                label="每日错误"
-                period="最近 365 天"
-                unit={{ one: "条错误", other: "条错误" }}
-                weekStartsOn={1}
-                locale="zh-CN"
-              />
-            </div>
+            // the heatmap scrolls itself, starting at the newest week
+            <ActivityHeatmap
+              days={padToWindow(data, 365)}
+              label="每日错误"
+              period="最近 365 天"
+              unit={{ one: "条错误", other: "条错误" }}
+              weekStartsOn={1}
+              locale="zh-CN"
+            />
           )}
         </Section>
       </div>
@@ -221,6 +220,24 @@ export default function LogsPage() {
       </Section>
     </>
   );
+}
+
+/**
+ * The heatmap spans the first to the last day it is given, but the API only returns days that had errors. Pin both
+ * ends to the full window so a young install still shows the whole year, with the quiet days as empty squares.
+ */
+function padToWindow(days: DailyErrorCount[], span: number): DailyErrorCount[] {
+  const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const today = new Date();
+  const start = ymd(new Date(today.getFullYear(), today.getMonth(), today.getDate() - (span - 1)));
+  const end = ymd(today);
+  const first = days[0]?.date;
+  const last = days.at(-1)?.date;
+  return [
+    ...(first !== undefined && first <= start ? [] : [{ date: start, count: 0 }]),
+    ...days,
+    ...(last !== undefined && last >= end ? [] : [{ date: end, count: 0 }]),
+  ];
 }
 
 function toSourceRow(s: LogSource): SourceRow {

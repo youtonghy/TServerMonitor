@@ -17,6 +17,8 @@
   clip-path: inset(50%);
   white-space: nowrap;
 }
+/* sshd option rows: selects and number inputs share one column width */
+.optionControl { flex: none; width: 200px; }
 .fieldset { display: grid; gap: 10px; margin: 0; padding: 0; border: 0; }
 .fieldset legend { margin-bottom: 8px; padding: 0; font-weight: 500; }
 

@@ -62,8 +62,6 @@
 .filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
 .filters > * { min-width: 160px; }
 
-.scrollX { min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; }
-
 /* Lists of items separated by hairlines, inside one panel. */
 .list { display: grid; margin: 0; padding: 0; list-style: none; }
 .list > li { display: grid; gap: 6px; min-width: 0; padding: 14px 0; border-top: 1px solid var(--border-subtle); }
