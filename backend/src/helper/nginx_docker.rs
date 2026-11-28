@@ -386,6 +386,15 @@ pub async fn install_blockers(ctx: &Ctx) -> Vec<String> {
             n.root.display()
         ));
     }
+    for dir in [n.root.as_path(), n.log_dir.as_path()] {
+        if !writable(dir) {
+            b.push(format!(
+                "{} 不存在或不可写：请使用新版 tsmonitor-helper.service（启动前自动创建该目录），或执行 install -d {} 后 systemctl restart tsmonitor-helper",
+                dir.display(),
+                dir.display()
+            ));
+        }
+    }
     if let Some(p) = rt::host_binary(ctx) {
         b.push(format!(
             "宿主机已安装 nginx（{}），请直接管理它，或先卸载系统包",
@@ -410,6 +419,16 @@ pub async fn install_blockers(ctx: &Ctx) -> Vec<String> {
         }
     }
     b
+}
+
+/// The directory exists and the helper can create files in it (systemd's ProtectSystem makes
+/// paths that were missing at start read-only).
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(".tsmonitor-write-test");
+    match std::fs::File::create(&probe) {
+        Ok(_) => std::fs::remove_file(&probe).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Copies the image's default config to the (empty) host root and switches it to the
@@ -747,17 +766,19 @@ fn version_list(tags: &[String]) -> Vec<Value> {
         .collect();
     v.sort_unstable_by(|a, b| b.cmp(a));
     v.dedup();
-    v.truncate(40);
-    let mut seen = [false; 2];
+    // newest 20 per channel, so frequent mainline releases do not crowd out stable
+    let mut count = [0usize; 2];
     v.into_iter()
-        .map(|(a, b, c)| {
+        .filter_map(|(a, b, c)| {
             let stable = b % 2 == 0;
-            let latest = !seen[stable as usize];
-            seen[stable as usize] = true;
-            json!({
-                "version": format!("{a}.{b}.{c}"),
-                "channel": if stable { "stable" } else { "mainline" },
-                "latest": latest,
+            let n = &mut count[stable as usize];
+            *n += 1;
+            (*n <= 20).then(|| {
+                json!({
+                    "version": format!("{a}.{b}.{c}"),
+                    "channel": if stable { "stable" } else { "mainline" },
+                    "latest": *n == 1,
+                })
             })
         })
         .collect()
