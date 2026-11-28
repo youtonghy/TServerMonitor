@@ -9,6 +9,7 @@
 
 use std::fmt::Write as _;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::proto::{OpError, OpResult};
@@ -22,7 +23,7 @@ pub const OWN_DIR: &str = "tsmonitor";
 const MAX_EXTRA: usize = 16 * 1024;
 const MAX_DOMAINS: usize = 50;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SiteKind {
     /// Forwards every request to an upstream URL.
@@ -41,7 +42,7 @@ impl SiteKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProxyOpts {
     /// `http://127.0.0.1:3000` or `https://backend.internal/app`.
@@ -65,7 +66,7 @@ impl Default for ProxyOpts {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct StaticOpts {
     /// Absolute document root; must lie under one of the helper's `site_roots`.
@@ -86,7 +87,7 @@ impl Default for StaticOpts {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ListenOpts {
     pub http: u16,
@@ -105,7 +106,7 @@ impl Default for ListenOpts {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Features {
     /// Redirect HTTP to HTTPS (only once a certificate is in place).
@@ -136,7 +137,7 @@ impl Default for Features {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SslMode {
     #[default]
@@ -149,7 +150,7 @@ pub enum SslMode {
     Path,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct SslOpts {
     pub mode: SslMode,
@@ -159,7 +160,7 @@ pub struct SslOpts {
     pub key_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SiteSpec {
     /// Config file name; also names the certificate directory and log files. Not renamable.
@@ -180,6 +181,23 @@ pub struct SiteSpec {
     /// Extra directives appended to the serving `server` block. Needs the `edit` permission.
     #[serde(default)]
     pub extra: String,
+}
+
+/// Structured output returned when the Agent drafts a managed site configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SiteDraftOutput {
+    pub spec: SiteSpec,
+    /// Concise Simplified Chinese summary of what was written or adjusted.
+    pub summary: String,
+}
+
+/// Structured output returned when the Agent drafts a raw nginx configuration file.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileDraftOutput {
+    /// Complete raw nginx config file text (no markdown code fences).
+    pub content: String,
+    /// Concise Simplified Chinese summary of what was written or adjusted.
+    pub summary: String,
 }
 
 /// Certificate state of a managed site, as reported in `nginx.sites`.

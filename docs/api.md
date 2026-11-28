@@ -216,7 +216,9 @@ interface AgentStep {
 | POST (admin) | `/api/v1/packages/jobs` body `{ op: "refresh" \| "upgrade_security" \| "upgrade_all" \| "upgrade_packages"; packages?: string[] }` | `202 { id }`; `400` when the update helper is not installed, a job is running, or a package name is invalid. Output streams as `package_job` events |
 | GET | `/api/v1/access/history?range=1h\|6h\|24h\|7d\|30d` | `AccessStats` from the persisted per-minute rollups (top lists and latency only up to 24h) |
 | GET | `/api/v1/ops/capabilities` | `OpsCapabilities` (helper reachable, enabled domains and allowed operations, dry-run, why writes are off) |
-| GET | `/api/v1/ops/read/{call}?path=` | `{ source: "helper" \| "local"; data }` for `docker.containers`, `docker.images`, `docker.volumes`, `docker.networks`, `nginx.sites`, `nginx.files`, `nginx.file` (`path`), `nginx.site_get` (`name`, helper only), `firewall.status`, `ssh.config`, `ssh.keys`. Falls back to what the daemon can read itself; `503` when only the helper can answer |
+| GET | `/api/v1/ops/read/{call}?path=` | `{ source: "helper" \| "local"; data }` for `docker.containers`, `docker.images`, `docker.volumes`, `docker.networks`, `nginx.sites` (each site includes extracted `target`), `nginx.files`, `nginx.file` (`path`), `nginx.site_get` (`name`, helper only), `firewall.status`, `ssh.config`, `ssh.keys`. Falls back to what the daemon can read itself; `503` when only the helper can answer |
+| GET | `/api/v1/nginx/sites/{name}/conversations` | `{ conversations: (Conversation & { queued: boolean })[]; requests: ChangeRequest[] }`: conversations started inside that nginx site panel (oldest first) and the change requests they filed |
+| POST (admin) | `/api/v1/nginx/draft` body `{ mode: "site" \| "file", instruction, site_name?, spec?, path?, content? }` | Uses read-only tools + structured output to draft a `SiteSpec` (`mode = "site"`) or full config text (`mode = "file"`), returning `{ mode, spec \| content, summary, warning, conversation_id }` |
 | GET | `/api/v1/ssh/sessions` | `{ user, tty, since, from }[]` from `who` |
 | GET | `/api/v1/ops/jobs?domain=&limit=` | `OpsJob[]` without `log` |
 | GET | `/api/v1/ops/jobs/{id}` | `OpsJob` with `log` |
@@ -254,7 +256,7 @@ interface ProviderInput { name?; api_format?; base_url?; auth?; default_model?; 
 // provider: a DB provider id or a config profile name; empty model = provider default
 interface Route { kind: string; provider: string; model: string; effort: Effort }
 // Every agent run belongs to a conversation. Scheduled runs get one each ("c_<run id>");
-// a chat holds one run per user turn. context: one of {report_id} | {alert_id} | {run_id} | {text};
+// a chat holds one run per user turn. context: one of {report_id} | {alert_id} | {run_id} | {nginx_site, file?, managed?} | {text};
 // a report context may name one item and what to do with it:
 // { report_id, item?: { section: "root_causes" | "recommendations" | "security_risks" | "anomalies"; index }, intent?: "explain" | "ask" | "fix" }.
 interface Conversation {

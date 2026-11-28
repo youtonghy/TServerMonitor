@@ -685,8 +685,8 @@ pub async fn list_conversations(
     limit: i64,
 ) -> Result<Vec<Conversation>> {
     let filter = match kind {
-        Some("chat") => "WHERE c.kind IN ('chat', 'prompt_gen')",
-        Some("task") => "WHERE c.kind NOT IN ('chat', 'prompt_gen')",
+        Some("chat") => "WHERE c.kind IN ('chat', 'prompt_gen', 'nginx_draft')",
+        Some("task") => "WHERE c.kind NOT IN ('chat', 'prompt_gen', 'nginx_draft')",
         _ => "",
     };
     let sql = format!(
@@ -705,6 +705,17 @@ pub async fn report_conversations(db: &Db, report_id: i64) -> Result<Vec<Convers
     );
     Ok(sqlx::query_as::<_, Conversation>(sqlx::AssertSqlSafe(sql))
         .bind(report_id)
+        .fetch_all(db)
+        .await?)
+}
+
+/// Conversations started inside an nginx site panel, oldest first.
+pub async fn nginx_site_conversations(db: &Db, site: &str) -> Result<Vec<Conversation>> {
+    let sql = format!(
+        "SELECT {CONV_COLS} FROM conversations c WHERE json_extract(c.context, '$.nginx_site') = ? ORDER BY c.created_at LIMIT 200"
+    );
+    Ok(sqlx::query_as::<_, Conversation>(sqlx::AssertSqlSafe(sql))
+        .bind(site)
         .fetch_all(db)
         .await?)
 }

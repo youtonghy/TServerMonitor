@@ -359,6 +359,7 @@ mod tests {
                 last_error: err.map(str::to_string),
                 ..Default::default()
             }),
+            target: None,
         };
         let c = certs(
             &[

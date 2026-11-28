@@ -510,11 +510,18 @@ pub async fn delete(ctx: &Ctx, root: &Path, a: DeleteArgs, call: &Call<'_>) -> O
     Ok(json!({ "changed": true }))
 }
 
-/// Adds certificate state to the managed entries of a site list.
+/// Adds certificate state and spec target to the managed entries of a site list.
 pub fn annotate(ctx: &Ctx, root: &Path, sites: &mut [inv::Site]) {
     for s in sites.iter_mut().filter(|s| s.managed) {
         if let Ok(Some(st)) = load_state(ctx, &s.name) {
             s.cert = Some(super::nginx_cert::cert_info(root, &st));
+            let t = match st.spec.kind {
+                spec_mod::SiteKind::Proxy => st.spec.proxy.upstream.clone(),
+                spec_mod::SiteKind::Static => st.spec.static_site.root.clone(),
+            };
+            if !t.is_empty() {
+                s.target = Some(t);
+            }
         }
     }
 }

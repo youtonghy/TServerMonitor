@@ -268,6 +268,11 @@ pub async fn chat_system(state: &Shared, conv: &crate::model::Conversation) -> S
         s.push_str("\n```");
         if ctx.get("item").is_some() {
             s.push_str(intent_rules(ctx["intent"].as_str().unwrap_or("ask")));
+        } else if ctx.get("nginx_site").is_some() {
+            s.push_str("\n\n本次任务：你正在该站点的管理面板中协助运维人员。");
+            s.push_str("\n- 回答问题时，结合上面的站点配置、相关健康建议和主机数据给出具体依据；需要最新状态时可调用只读工具（如 get_access_stats、search_log_clusters、list_ports、get_nginx_file、get_nginx_site）。");
+            s.push_str("\n- 如果用户要求撰写、修改、优化或加固该站点配置，且当前信息已明确，请生成合法完整的配置并调用 propose_change 提交变更申请（面板管理站点使用 get_nginx_site 提供的 spec 与 base_sha256 提交 nginx.site_save；手动维护站点使用 get_nginx_file 提供的原文与 base_sha256 提交 nginx.write），不要把 <redacted> 写回配置，也不要使用 load_module/user/env/pid/lock_file/lua/perl/js_ 等禁止指令。");
+            s.push_str("\n- 如果用户需求缺少关键参数（如目标端口、域名或根目录），可先调用 list_containers / list_ports / get_ops_inventory 探明；仍无法确定时直接说明并向用户确认。");
         }
     }
     if let Ok(reqs) =
@@ -319,19 +324,108 @@ async fn context_block(state: &Shared, ctx: &Value) -> Option<String> {
             .find(|s| s.kind == "message")
             .and_then(|s| s.text.clone());
         json!({ "type": "agent_run", "run": run, "final_message": last })
+    } else if let Some(name) = ctx["nginx_site"].as_str() {
+        let sites = crate::ops::read(state, "nginx.sites", json!({})).await.ok();
+        let site = sites
+            .as_ref()
+            .and_then(|v| v["data"]["sites"].as_array())
+            .and_then(|arr| arr.iter().find(|s| s["name"].as_str() == Some(name)))
+            .cloned();
+        let managed = site
+            .as_ref()
+            .and_then(|s| s["managed"].as_bool())
+            .or_else(|| ctx["managed"].as_bool())
+            .unwrap_or(false);
+        let file_path = site
+            .as_ref()
+            .and_then(|s| s["file"].as_str())
+            .or_else(|| ctx["file"].as_str())
+            .map(str::to_string);
+        let managed_detail = if managed {
+            crate::ops::read(state, "nginx.site_get", json!({ "name": name }))
+                .await
+                .ok()
+                .map(|mut v| {
+                    if let Some(extra) = v["data"]["spec"]["extra"].as_str() {
+                        v["data"]["spec"]["extra"] = crate::ops::redact_config(extra).into();
+                    }
+                    v["data"].clone()
+                })
+        } else {
+            None
+        };
+        let file = match &file_path {
+            Some(p) => crate::ops::read(state, "nginx.file", json!({ "path": p }))
+                .await
+                .ok()
+                .map(|mut v| {
+                    if let Some(content) = v["data"]["content"].as_str() {
+                        v["data"]["content"] = crate::ops::redact_config(content).into();
+                    }
+                    v["data"].clone()
+                }),
+            None => None,
+        };
+        let findings: Vec<Value> = store::list_findings(&state.db, false)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| matches!(f.category.as_str(), "nginx" | "perf" | "cert"))
+            .take(15)
+            .map(|f| {
+                json!({
+                    "severity": f.severity,
+                    "category": f.category,
+                    "title": f.title,
+                    "detail": f.detail,
+                    "evidence": f.evidence,
+                })
+            })
+            .collect();
+        json!({
+            "type": "nginx_site",
+            "name": name,
+            "site": site,
+            "managed_detail": managed_detail,
+            "file": file,
+            "findings": findings,
+        })
     } else {
         json!({ "type": "note", "text": ctx["text"].as_str()? })
     };
     serde_json::to_string_pretty(&v).ok()
 }
 
-/// JSON Schema for `Diagnosis`, inlined and tightened for strict structured-output providers.
-pub fn output_schema() -> Value {
+pub const NGINX_SITE_DRAFT_SYSTEM: &str = r#"你是 TServerMonitor 的 nginx 站点配置撰写助手。用户正在面板的站点表单中配置或修改一个 nginx 站点，要求你根据描述生成或更新完整的站点配置（SiteSpec）以及简明的中文改动说明（summary）。
+
+你可以调用只读工具（如 list_containers、list_ports、get_ops_inventory、get_nginx_file、get_nginx_site、list_findings、get_access_stats）核实本机已运行的端口、容器、现有站点域名、nginx.conf 全局配置和证书路径，确保生成的配置可在本机直接运行。
+
+规则（必须遵守）：
+1. 若用户基于已有站点修改（提示中给出了当前 spec），必须保留原 site name 和用户未要求改动的字段。
+2. 必须严格遵守当前主机约束（prompts 中提供的 site_roots、cert_paths、acme.enabled、allow_cert、allow_edit）：
+   - kind="static" 时，static.root 必须位于允许的 site_roots 之下（如 /var/www/<name>）。
+   - kind="proxy" 时，proxy.upstream 必须是 http:// 或 https:// 开头的完整地址（不能是 unix: 或带用户名密码）。
+   - 未允许 cert 或 acme 未开启时，ssl.mode 保持 "none"；通配符域名或 IP 不能用 "acme"。
+   - 未允许 edit 时，extra 必须为空字符串 ""；允许 edit 时，extra 仅放需要追加在 server 块内的额外指令（例如 location、限流、安全头等，注意花括号配对，不要重复写入表单已覆盖的 listen/server_name/proxy_pass/root/gzip）。
+   - 绝对不要输出禁止指令（load_module、user、env、pid、lock_file、perl*、js_*、lua_*、*_by_lua*）、.. 路径穿越或 <redacted> 占位符；日志路径必须在 /var/log/ 下。
+3. summary 用简体中文写 1~3 句，概括你撰写/修改了哪些设置以及原因（例如代理目标、SSL、缓存、限流或安全头）。"#;
+
+pub const NGINX_FILE_DRAFT_SYSTEM: &str = r#"你是 TServerMonitor 的 nginx 配置文件撰写助手。用户正在编辑器中编写或优化一个 nginx 配置文件（如站点配置、conf.d 片段或 snippets），要求你根据用户需求和现有文件内容，直接输出修改后的完整配置文件正文（content）与简明的中文改动说明（summary）。
+
+你可以调用只读工具（如 list_containers、list_ports、get_ops_inventory、get_nginx_file、list_findings、get_access_stats）核实本机端口、容器、nginx.conf、snippets 与现状问题。
+
+规则（必须遵守）：
+1. content 必须是纯文本 nginx 配置（不要包含 ```nginx 或 ``` 代码块围栏），保留原有有效配置块与注释（除非用户明确要求替换或删除），语法必须正确、花括号配对。
+2. 如果原文中出现 <redacted> 占位符，不要修改包含占位符的敏感指令或将其原样写回导致无法保存；如无法避免请在 summary 中提醒管理员。
+3. 绝对不要使用禁止指令（load_module、user、env、pid、lock_file、perl*、js_*、lua_*、*_by_lua*）或包含 .. 的路径；access_log/error_log 路径必须位于 /var/log/ 下（或 off/stderr/syslog:/memory:）；include 绝对路径只能位于 /etc/nginx/ 或 /usr/share/nginx/ 下。
+4. summary 用简体中文写 1~3 句，说明撰写或优化了哪些配置。
+5. 只输出要求的 JSON 对象。"#;
+
+/// Inlined, strict JSON Schema for `T`, usable by structured-output providers.
+pub fn schema_for<T: schemars::JsonSchema>() -> Value {
     let settings =
         schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true);
-    let schema = settings
-        .into_generator()
-        .into_root_schema_for::<Diagnosis>();
+    let schema = settings.into_generator().into_root_schema_for::<T>();
     let mut v = serde_json::to_value(schema).unwrap_or(Value::Null);
     tighten(&mut v);
     if let Some(o) = v.as_object_mut() {
@@ -341,10 +435,27 @@ pub fn output_schema() -> Value {
     v
 }
 
+/// JSON Schema for `Diagnosis`, inlined and tightened for strict structured-output providers.
+pub fn output_schema() -> Value {
+    schema_for::<Diagnosis>()
+}
+
+pub fn nginx_site_draft_schema() -> Value {
+    schema_for::<crate::ops::nginx_site::SiteDraftOutput>()
+}
+
+pub fn nginx_file_draft_schema() -> Value {
+    schema_for::<crate::ops::nginx_site::FileDraftOutput>()
+}
+
 fn tighten(v: &mut Value) {
     match v {
         Value::Object(o) => {
             o.remove("format");
+            o.remove("minimum");
+            o.remove("maximum");
+            o.remove("default");
+            collapse_string_one_of(o);
             if o.get("type").and_then(Value::as_str) == Some("object")
                 && let Some(Value::Object(props)) = o.get("properties")
             {
@@ -358,6 +469,69 @@ fn tighten(v: &mut Value) {
         }
         Value::Array(a) => a.iter_mut().for_each(tighten),
         _ => {}
+    }
+}
+
+/// Flattens `schemars`'s `oneOf` of documented string enum variants into a
+/// plain `type: "string", enum: [...]` so strict structured-output backends
+/// accept the schema without rejecting `oneOf`.
+fn collapse_string_one_of(o: &mut serde_json::Map<String, Value>) {
+    let Some(Value::Array(variants)) = o.get("oneOf") else {
+        return;
+    };
+    let mut values = Vec::new();
+    let mut notes = Vec::new();
+    for item in variants {
+        let Some(obj) = item.as_object() else {
+            return;
+        };
+        if obj.get("type").and_then(Value::as_str) != Some("string")
+            || !obj
+                .keys()
+                .all(|k| matches!(k.as_str(), "type" | "const" | "enum" | "description"))
+        {
+            return;
+        }
+        let desc = obj.get("description").and_then(Value::as_str);
+        if let Some(Value::String(s)) = obj.get("const") {
+            if let Some(d) = desc {
+                notes.push(format!("`{s}`: {d}"));
+            }
+            values.push(Value::String(s.clone()));
+        } else if let Some(Value::Array(arr)) = obj.get("enum")
+            && arr.iter().all(Value::is_string)
+        {
+            for v in arr {
+                if let Some(s) = v.as_str()
+                    && let Some(d) = desc
+                {
+                    notes.push(format!("`{s}`: {d}"));
+                }
+                values.push(v.clone());
+            }
+        } else {
+            return;
+        }
+    }
+    if values.is_empty() {
+        return;
+    }
+    o.remove("oneOf");
+    o.insert("type".into(), Value::String("string".into()));
+    o.insert("enum".into(), Value::Array(values));
+    if !notes.is_empty() {
+        let joined = notes.join(" ");
+        match o.get("description").and_then(Value::as_str) {
+            Some(prev) if !prev.is_empty() => {
+                o.insert(
+                    "description".into(),
+                    Value::String(format!("{prev} {joined}")),
+                );
+            }
+            _ => {
+                o.insert("description".into(), Value::String(joined));
+            }
+        }
     }
 }
 
@@ -376,6 +550,31 @@ mod tests {
         assert_eq!(
             s["properties"]["recommendations"]["items"]["properties"]["priority"]["enum"],
             json!(["high", "medium", "low"])
+        );
+    }
+
+    #[test]
+    fn nginx_draft_schemas_are_inlined_and_strict() {
+        for s in [nginx_site_draft_schema(), nginx_file_draft_schema()] {
+            let text = s.to_string();
+            assert!(!text.contains("$ref"), "{text}");
+            assert!(!text.contains("\"oneOf\""), "{text}");
+            assert!(!text.contains("\"anyOf\""), "{text}");
+            assert!(!text.contains("\"format\""), "{text}");
+            assert!(!text.contains("\"minimum\""), "{text}");
+            assert!(!text.contains("\"maximum\""), "{text}");
+            assert!(!text.contains("\"default\""), "{text}");
+            assert_eq!(s["additionalProperties"], false);
+        }
+        let site = nginx_site_draft_schema();
+        assert_eq!(site["properties"]["spec"]["additionalProperties"], false);
+        assert_eq!(
+            site["properties"]["spec"]["properties"]["kind"]["enum"],
+            json!(["proxy", "static"])
+        );
+        assert_eq!(
+            site["properties"]["spec"]["properties"]["ssl"]["properties"]["mode"]["enum"],
+            json!(["none", "acme", "upload", "path"])
         );
     }
 }

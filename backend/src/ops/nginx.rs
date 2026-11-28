@@ -45,6 +45,9 @@ pub struct Site {
     /// Certificate state of a managed site (filled in by the helper).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert: Option<CertInfo>,
+    /// Primary upstream proxy URL, document root, or fastcgi backend extracted from config/spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +69,12 @@ static SERVER_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)(?:^|[\s{;])server_name\s+([^;{}]+);").expect("regex"));
 static LISTEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)(?:^|[\s{;])listen\s+([^;{}]+);").expect("regex"));
+static PROXY_PASS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)(?:^|[\s{;])proxy_pass\s+([^;{}]+);").expect("regex"));
+static FASTCGI_PASS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)(?:^|[\s{;])fastcgi_pass\s+([^;{}]+);").expect("regex"));
+static ROOT_DIR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)(?:^|[\s{;])root\s+([^;{}]+);").expect("regex"));
 
 /// Files never shown: keys, certificates, password files.
 fn secret_name(name: &str) -> bool {
@@ -104,6 +113,27 @@ pub fn site_info(text: &str) -> (Vec<String>, Vec<String>, bool) {
     (names, listen, ssl)
 }
 
+/// Extracts the primary target (`proxy_pass`, `root`, and/or `fastcgi_pass`) from nginx config text.
+pub fn site_target(text: &str) -> Option<String> {
+    let t = strip_comments(text);
+    let first_val = |re: &Regex| {
+        re.captures(&t)
+            .map(|c| c[1].split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(proxy) = first_val(&PROXY_PASS) {
+        return Some(proxy);
+    }
+    let root = first_val(&ROOT_DIR);
+    let fcgi = first_val(&FASTCGI_PASS);
+    match (root, fcgi) {
+        (Some(dir), Some(f)) => Some(format!("{dir} (PHP: {f})")),
+        (Some(dir), None) => Some(dir),
+        (None, Some(f)) => Some(format!("fastcgi: {f}")),
+        (None, None) => None,
+    }
+}
+
 pub fn layout(root: &Path) -> Layout {
     if root.join("sites-available").is_dir() {
         Layout::SitesEnabled
@@ -136,6 +166,7 @@ fn site(name: String, file: String, enabled: bool, layout: Layout, text: &str) -
         kind: marker.as_ref().and_then(|m| m.kind),
         drifted: marker.is_some_and(|m| m.drifted),
         cert: None,
+        target: site_target(text),
     }
 }
 
@@ -437,5 +468,26 @@ mod tests {
         }
         let d = unified_diff("conf.d/a.conf", "a\nb\n", "a\nc\n");
         assert!(d.contains("-b") && d.contains("+c") && d.contains("b/conf.d/a.conf"));
+    }
+
+    #[test]
+    fn site_target_extraction() {
+        assert_eq!(site_target(SITE).as_deref(), Some("http://127.0.0.1:3000"));
+        assert_eq!(
+            site_target("server { root /var/www/blog; index index.html; }").as_deref(),
+            Some("/var/www/blog")
+        );
+        assert_eq!(
+            site_target("server { root /var/www/wp; location ~ \\.php$ { fastcgi_pass unix:/run/php/php8.3-fpm.sock; } }").as_deref(),
+            Some("/var/www/wp (PHP: unix:/run/php/php8.3-fpm.sock)")
+        );
+        assert_eq!(
+            site_target("server { fastcgi_pass 127.0.0.1:9000; }").as_deref(),
+            Some("fastcgi: 127.0.0.1:9000")
+        );
+        assert_eq!(
+            site_target("# proxy_pass http://ignored;\nserver { listen 80; }"),
+            None
+        );
     }
 }

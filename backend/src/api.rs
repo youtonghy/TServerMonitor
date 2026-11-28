@@ -777,13 +777,33 @@ fn report_item_context(obj: &serde_json::Map<String, Value>) -> bool {
         && intent_ok
 }
 
-/// Accepts exactly one of `report_id` (optionally with one of its items), `alert_id`, `run_id`
-/// or `text` (a note such as a package list).
+/// `{ nginx_site, file?, managed? }`: one nginx site panel.
+fn nginx_site_context(obj: &serde_json::Map<String, Value>) -> bool {
+    let name_ok = obj
+        .get("nginx_site")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.len() <= 64 && crate::ops::validate::file_name(s).is_ok());
+    let file_ok = obj.get("file").is_none_or(|f| {
+        f.as_str()
+            .is_some_and(|s| s.len() <= 200 && crate::ops::validate::rel_path(s).is_ok())
+    });
+    let managed_ok = obj.get("managed").is_none_or(Value::is_boolean);
+    name_ok
+        && file_ok
+        && managed_ok
+        && obj
+            .keys()
+            .all(|k| matches!(k.as_str(), "nginx_site" | "file" | "managed"))
+}
+
+/// Accepts exactly one of `report_id` (optionally with one of its items), `alert_id`, `run_id`,
+/// `nginx_site` (optionally with `file` and `managed`) or `text` (a note such as a package list).
 fn clean_context(ctx: &Value) -> Result<Value, ApiError> {
     let obj = ctx
         .as_object()
         .ok_or_else(|| bad_request("context 必须是对象"))?;
     let ok = report_item_context(obj)
+        || nginx_site_context(obj)
         || obj.len() == 1
             && (obj.get("report_id").is_some_and(Value::is_i64)
                 || obj.get("alert_id").is_some_and(Value::is_i64)
@@ -797,7 +817,7 @@ fn clean_context(ctx: &Value) -> Result<Value, ApiError> {
                     .is_some_and(|s| s.chars().count() <= 20_000));
     if !ok {
         return Err(bad_request(
-            "context 只能是 report_id（可附 item 与 intent）、alert_id、run_id 或 text 之一",
+            "context 只能是 report_id（可附 item 与 intent）、nginx_site（可附 file 与 managed）、alert_id、run_id 或 text 之一",
         ));
     }
     Ok(ctx.clone())
@@ -879,6 +899,23 @@ async fn get_report_conversations(
     Path(id): Path<i64>,
 ) -> ApiResult<Value> {
     let convs = store::report_conversations(&state.db, id).await?;
+    conversations_with_requests(&state, convs).await
+}
+
+/// Conversations started from an nginx site panel, with their change requests.
+async fn get_nginx_site_conversations(
+    State(state): State<Shared>,
+    Path(name): Path<String>,
+) -> ApiResult<Value> {
+    crate::ops::validate::file_name(&name)?;
+    let convs = store::nginx_site_conversations(&state.db, &name).await?;
+    conversations_with_requests(&state, convs).await
+}
+
+async fn conversations_with_requests(
+    state: &Shared,
+    convs: Vec<crate::model::Conversation>,
+) -> ApiResult<Value> {
     let queued = state
         .agent()
         .map(|a| a.queued_conversations())
@@ -895,6 +932,198 @@ async fn get_report_conversations(
         })
         .collect();
     Ok(Json(json!({ "conversations": list, "requests": requests })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NginxDraftBody {
+    mode: String,
+    instruction: String,
+    site_name: Option<String>,
+    spec: Option<crate::ops::nginx_site::SiteSpec>,
+    path: Option<String>,
+    content: Option<String>,
+}
+
+fn strip_code_fence(raw: &str) -> String {
+    let t = raw.trim();
+    if let Some(rest) = t.strip_prefix("```")
+        && let Some((_lang, body)) = rest.split_once('\n')
+        && let Some(inner) = body.trim_end().strip_suffix("```")
+    {
+        return inner.trim_end().to_string();
+    }
+    t.to_string()
+}
+
+async fn post_nginx_draft(
+    State(state): State<Shared>,
+    Json(b): Json<NginxDraftBody>,
+) -> ApiResult<Value> {
+    if !matches!(b.mode.as_str(), "site" | "file") {
+        return Err(bad_request("mode 必须是 site 或 file"));
+    }
+    let instruction = clean_message(&b.instruction)?;
+    let site_name = b
+        .site_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| crate::ops::validate::file_name(s).map(str::to_string))
+        .transpose()?;
+    let path = b
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|p| {
+            crate::ops::nginx::check_path(p, &[], false)?;
+            Ok::<_, ApiError>(p.to_string())
+        })
+        .transpose()?;
+    if let Some(c) = &b.content
+        && c.len() > crate::ops::nginx::MAX_FILE
+    {
+        return Err(bad_request("配置文件内容不能超过 512 KiB"));
+    }
+
+    let caps = crate::ops::capabilities(&state).await;
+    let nginx_caps = &caps.domains["nginx"];
+    let sites_summary: Value = crate::ops::read(&state, "nginx.sites", json!({}))
+        .await
+        .ok()
+        .and_then(|v| v["data"]["sites"].as_array().cloned())
+        .map(|arr| {
+            arr.into_iter()
+                .map(|s| {
+                    json!({
+                        "name": s["name"],
+                        "file": s["file"],
+                        "server_names": s["server_names"],
+                        "managed": s["managed"],
+                        "target": s["target"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| json!([]));
+
+    let allow = nginx_caps["allow"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let constraints = json!({
+        "site_roots": nginx_caps["site_roots"],
+        "cert_paths": nginx_caps["cert_paths"],
+        "acme": nginx_caps["acme"],
+        "allow_cert": allow.contains(&"cert"),
+        "allow_edit": allow.contains(&"edit"),
+        "allow_manage": allow.contains(&"manage"),
+    });
+
+    if b.mode == "site" {
+        let mut current_spec = b.spec.clone();
+        if let Some(s) = &mut current_spec {
+            s.extra = crate::ops::redact_config(&s.extra);
+        }
+        let payload = json!({
+            "instruction": instruction,
+            "site_name": site_name,
+            "current_spec": current_spec,
+            "host_constraints": constraints,
+            "existing_sites": sites_summary,
+        });
+        let prompt_text = format!(
+            "请根据以下用户需求与当前上下文生成或更新站点配置（JSON）：\n```json\n{}\n```",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+        let title = format!(
+            "撰写站点配置：{}",
+            site_name.as_deref().unwrap_or("新站点")
+        );
+        let (conv_id, val) = agent_of(&state)?
+            .draft_structured(
+                "nginx_draft",
+                &title,
+                None,
+                "chat",
+                crate::agent::prompt::NGINX_SITE_DRAFT_SYSTEM,
+                &prompt_text,
+                crate::agent::prompt::nginx_site_draft_schema(),
+                true,
+            )
+            .await
+            .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+        let mut out: crate::ops::nginx_site::SiteDraftOutput = serde_json::from_value(val)
+            .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("模型返回的站点配置格式无效：{e}")))?;
+        if let Some(name) = site_name {
+            out.spec.name = name;
+        }
+        let mut warnings = Vec::new();
+        if crate::ops::has_placeholder(&out.spec.extra) {
+            warnings.push("自定义配置包含脱敏占位符，保存前请核对。".to_string());
+        }
+        if let Err(e) = out.spec.normalize() {
+            warnings.push(format!("部分字段可能需要调整后再保存：{}", e.message));
+        }
+        Ok(Json(json!({
+            "mode": "site",
+            "spec": out.spec,
+            "summary": out.summary.trim(),
+            "warning": (!warnings.is_empty()).then(|| warnings.join("；")),
+            "conversation_id": conv_id,
+        })))
+    } else {
+        let current_content = b.content.as_deref().map(crate::ops::redact_config);
+        let payload = json!({
+            "instruction": instruction,
+            "path": path,
+            "current_content": current_content,
+            "host_constraints": constraints,
+            "existing_sites": sites_summary,
+        });
+        let prompt_text = format!(
+            "请根据以下用户需求与当前文件上下文撰写完整的 nginx 配置：\n```json\n{}\n```",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+        let title = format!(
+            "撰写 nginx 配置：{}",
+            path.as_deref().unwrap_or("配置文件")
+        );
+        let (conv_id, val) = agent_of(&state)?
+            .draft_structured(
+                "nginx_draft",
+                &title,
+                None,
+                "chat",
+                crate::agent::prompt::NGINX_FILE_DRAFT_SYSTEM,
+                &prompt_text,
+                crate::agent::prompt::nginx_file_draft_schema(),
+                true,
+            )
+            .await
+            .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+        let out: crate::ops::nginx_site::FileDraftOutput = serde_json::from_value(val)
+            .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("模型返回的配置文件格式无效：{e}")))?;
+        let mut content = strip_code_fence(&out.content);
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        let mut warnings = Vec::new();
+        if crate::ops::has_placeholder(&content) {
+            warnings.push("配置中包含脱敏占位符（如 <redacted>），请手工恢复敏感字段后再保存。".to_string());
+        }
+        if let Err(e) = crate::ops::nginx::check_directives(&content) {
+            warnings.push(e.message);
+        }
+        Ok(Json(json!({
+            "mode": "file",
+            "content": content,
+            "summary": out.summary.trim(),
+            "warning": (!warnings.is_empty()).then(|| warnings.join("；")),
+            "conversation_id": conv_id,
+        })))
+    }
 }
 
 // ---------------------------------------------------------------- prompts & tasks
@@ -1867,6 +2096,10 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/ops/audit", get(get_ops_audit))
         .route("/api/v1/ops/pending", get(get_ops_pending))
         .route("/api/v1/ops/read/{call}", get(get_ops_read))
+        .route(
+            "/api/v1/nginx/sites/{name}/conversations",
+            get(get_nginx_site_conversations),
+        )
         .route("/api/v1/ssh/sessions", get(get_ssh_sessions))
         .nest_service("/mcp", crate::mcp::service(state.clone(), false))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -1897,6 +2130,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/agent/runs/{id}/cancel", post(post_cancel))
         .route("/api/v1/prompts", post(post_prompt))
         .route("/api/v1/prompts/generate", post(post_generate_prompt))
+        .route("/api/v1/nginx/draft", post(post_nginx_draft))
         .route(
             "/api/v1/prompts/{id}",
             patch(patch_prompt).delete(delete_prompt),
@@ -1947,6 +2181,12 @@ mod tests {
         assert!(ok(
             json!({ "report_id": 3, "item": { "section": "anomalies", "index": 0 } })
         ));
+        assert!(ok(json!({ "nginx_site": "app" })));
+        assert!(ok(
+            json!({ "nginx_site": "wordpress", "file": "sites-available/wordpress", "managed": false })
+        ));
+        assert!(!ok(json!({ "nginx_site": "../etc" })));
+        assert!(!ok(json!({ "nginx_site": "app", "file": "/etc/nginx/x" })));
         assert!(!ok(
             json!({ "report_id": 3, "item": { "section": "summary", "index": 0 } })
         ));
@@ -1956,6 +2196,19 @@ mod tests {
         assert!(!ok(json!({ "report_id": 3, "intent": "delete" })));
         assert!(!ok(json!({ "report_id": 3, "alert_id": 1 })));
         assert!(!ok(json!({ "alert_id": 3, "intent": "fix" })));
+    }
+
+    #[test]
+    fn code_fence_stripping() {
+        assert_eq!(strip_code_fence("server {\n    listen 80;\n}"), "server {\n    listen 80;\n}");
+        assert_eq!(
+            strip_code_fence("```nginx\nserver {\n    listen 80;\n}\n```"),
+            "server {\n    listen 80;\n}"
+        );
+        assert_eq!(
+            strip_code_fence("```\nserver {}\n```"),
+            "server {}"
+        );
     }
 
     #[test]

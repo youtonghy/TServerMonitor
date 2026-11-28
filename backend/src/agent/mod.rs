@@ -634,6 +634,113 @@ impl AgentManager {
             .context("模型没有返回内容")
     }
 
+    /// Structured request with optional read-only tools, recorded as its own conversation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn draft_structured(
+        self: &Arc<Self>,
+        kind: &str,
+        title: &str,
+        context: Option<&Value>,
+        route: &str,
+        system: &str,
+        prompt_text: &str,
+        output_schema: Value,
+        with_tools: bool,
+    ) -> Result<(String, Value)> {
+        let state = self.state.upgrade().context("daemon shutting down")?;
+        let reason = self.unavailable(&state, route, true).await;
+        let profile = self.profile(&state, route);
+        let p = match (reason, profile) {
+            (None, Some(p)) => p,
+            (reason, _) => bail!("{}", reason.unwrap_or_else(|| "未配置模型".into())),
+        };
+        let conv_id = format!("c_{}", uuid::Uuid::new_v4().simple());
+        let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
+        self.reserve_interactive(&conv_id, &run_id)
+            .map_err(|_| anyhow!("当前进行中的对话已达上限，请稍后再试"))?;
+        if let Err(e) =
+            store::create_conversation(&state.db, &conv_id, title, kind, context).await
+        {
+            self.finish_active(&run_id);
+            self.start_queued().await;
+            return Err(e);
+        }
+        let res = async {
+            store::insert_run(
+                &state.db,
+                &store::NewRun {
+                    id: &run_id,
+                    trigger: "user",
+                    kind: "chat",
+                    model: Some(&p.model),
+                    conversation_id: &conv_id,
+                },
+            )
+            .await?;
+            let mut seq = 0;
+            self.record(
+                &state,
+                &run_id,
+                &conv_id,
+                &mut seq,
+                draft("user", None, None, None, Some(prompt_text.to_string())),
+            )
+            .await;
+            let msg = json!({
+                "type": "run",
+                "run_id": run_id,
+                "mode": "structured",
+                "system": system,
+                "prompt": prompt_text,
+                "model": model_spec(&p),
+                "max_steps": state.cfg.ai.max_steps.min(8),
+                "tools": if with_tools { tools::definitions() } else { Vec::new() },
+                "output_schema": output_schema,
+            });
+            match self
+                .run_with_timeout(&state, &run_id, &conv_id, &mut seq, &msg)
+                .await
+            {
+                Ok(o) => {
+                    if let Some(summary) =
+                        o.output["summary"].as_str().filter(|s| !s.trim().is_empty())
+                    {
+                        self.record(
+                            &state,
+                            &run_id,
+                            &conv_id,
+                            &mut seq,
+                            draft("message", None, None, None, Some(summary.trim().to_string())),
+                        )
+                        .await;
+                    }
+                    self.finish(&state, &run_id, &conv_id, "succeeded", None, None)
+                        .await?;
+                    Ok((conv_id.clone(), o.output))
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    self.record(
+                        &state,
+                        &run_id,
+                        &conv_id,
+                        &mut seq,
+                        draft("error", None, None, None, Some(msg.clone())),
+                    )
+                    .await;
+                    let _ = self
+                        .finish(&state, &run_id, &conv_id, "failed", Some(&msg), None)
+                        .await;
+                    Err(e)
+                }
+            }
+        }
+        .await;
+        self.finish_active(&run_id);
+        self.start_queued().await;
+        res
+    }
+
     fn reserve_interactive(&self, conversation: &str, run_id: &str) -> Result<(), TriggerError> {
         {
             let mut active = lock(&self.active);
