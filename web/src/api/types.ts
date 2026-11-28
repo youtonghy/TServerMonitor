@@ -362,6 +362,8 @@ export interface OpsDomainCaps {
   /** nginx only: where managed static sites may live and existing certificates may be read. */
   site_roots?: string[]; cert_paths?: string[];
   acme?: { enabled: boolean; staging: boolean; custom_directory: boolean; renew_days: number };
+  /** nginx only: how the helper runs nginx (helper.toml `[nginx] runtime`). */
+  runtime?: "auto" | "host" | "docker";
 }
 export interface OpsCapabilities {
   /** The helper answered. */
@@ -443,6 +445,33 @@ export interface NginxSiteDetail {
 export interface NginxSites { layout: "sites_enabled" | "conf_d"; sites: NginxSite[] }
 export interface NginxFileEntry { path: string; size: number; editable: boolean }
 export interface NginxFile { path: string; content: string; sha256: string; editable: boolean }
+/** `nginx.status`: how nginx runs on the host (system package, Docker container, or not installed). */
+export interface NginxStatus {
+  runtime: "host" | "docker" | "none";
+  configured_runtime: "auto" | "host" | "docker";
+  installed: boolean;
+  running: boolean;
+  version: string | null;
+  modules: string[];
+  build: string | null;
+  workers: number | null;
+  /** Unix seconds. */
+  started_at: number | null;
+  /** systemd unit, when systemd manages nginx. */
+  service: string | null;
+  container: { name: string; id: string; image: string; state: string } | null;
+  package: { manager: "apt"; installed: string | null; candidate: string | null } | null;
+  /** docker: the image a rollback returns to. */
+  previous_image: string | null;
+  /** Why installing is impossible (only meaningful when runtime is "none"). */
+  install_blockers: string[];
+  docker_available: boolean;
+}
+/** `latest` = newest in its channel. */
+export interface NginxVersion { version: string; channel: "stable" | "mainline"; latest: boolean }
+/** `nginx.versions`: newest first. */
+export interface NginxVersions { image: string; versions: NginxVersion[] }
+export interface NginxLogTail { path: string; lines: string[]; truncated: boolean }
 
 export interface FirewallRule { spec: string; action: string; port: string | null; proto: string | null; from: string | null; deletable: boolean }
 export interface FirewallStatus {

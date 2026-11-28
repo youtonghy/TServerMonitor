@@ -158,7 +158,13 @@
 }
 .chatComposer { display: grid; gap: 8px; }
 
-/* File grouping in /nginx/files. */
+/* Config files dialog (/nginx?files=). Doubled class beats the base dialog width. */
+.filesDialog.filesDialog { width: min(calc(100vw - var(--space-8)), 1280px); height: calc(100vh - var(--space-8)); height: calc(100dvh - var(--space-8)); }
+.filesBody { display: grid; gap: 16px; min-width: 0; }
+/* A site file row: the pick button plus its enable switch. */
+.fileRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+
+/* File grouping in the config files dialog. */
 .fileGroups { display: grid; gap: 14px; }
 .fileGroup { display: grid; gap: 4px; }
 .fileGroupLabel {
@@ -168,3 +174,25 @@
   font-size: 12px;
   font-weight: 500;
 }
+
+/* nginx service panel. */
+.serviceActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.moduleList { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.disclosure { display: grid; gap: 10px; }
+.disclosure summary { width: fit-content; color: var(--text-secondary); font-size: var(--text-sm); cursor: pointer; }
+.logView {
+  max-height: min(60vh, 640px);
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.logDialog.logDialog { width: min(calc(100vw - var(--space-8)), 1100px); }
+.versionList { max-height: min(50vh, 420px); overflow-y: auto; }

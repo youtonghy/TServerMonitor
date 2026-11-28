@@ -12,7 +12,8 @@ import { useQuery } from "@/api/useQuery";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { OpsJobLog } from "@/components/job-log";
 import { CertDialog } from "@/components/nginx-cert-dialog";
-import { NginxFilesView } from "@/components/nginx-files-view";
+import { NginxFilesDialog } from "@/components/nginx-files-dialog";
+import { NginxServicePanel } from "@/components/nginx-service-panel";
 import { SiteDrawer, type SiteDrawerTarget } from "@/components/nginx-site-drawer";
 import { JobResult, OpsNotice, can, diffOf, useOpsAction, useOpsCaps } from "@/components/ops";
 import { PageHeader, Panel, Section, errorMessage, useNow } from "@/components/panel";
@@ -43,7 +44,10 @@ export default function NginxPage() {
   const consumedLinkRef = useRef<string | null>(null);
   const drawerSeqRef = useRef(0);
 
-  const isFilesView = route.segments[1] === "files";
+  // Config files open in a dialog: /nginx?files=<path> (empty = no file selected).
+  const legacyFiles = route.segments[1] === "files";
+  const filesParam = legacyFiles ? null : route.params.get("files");
+  const filesOpen = filesParam !== null;
   const c = caps.data;
   const nginxCaps = c?.domains.nginx;
   const allowSite = can(c, "nginx", "site");
@@ -73,7 +77,13 @@ export default function NginxPage() {
 
   const siteParam = route.params.get("site");
   const tabParam = route.params.get("tab") === "agent" ? "agent" : "config";
-  const linkKey = !isFilesView && siteParam ? `${siteParam}:${tabParam}` : null;
+  const linkKey = siteParam ? `${siteParam}:${tabParam}` : null;
+
+  // Old full-page route /nginx/files?path=X now opens the dialog.
+  const legacyPath = legacyFiles ? route.params.get("path") ?? "" : null;
+  useEffect(() => {
+    if (legacyPath !== null) navigate(`/nginx?files=${encodeURIComponent(legacyPath)}`, { replace: true });
+  }, [legacyPath]);
 
   useEffect(() => {
     if (!linkKey) {
@@ -89,7 +99,15 @@ export default function NginxPage() {
   }, [linkKey, siteList, siteParam, tabParam]);
 
   const openFiles = (path?: string) => {
-    navigate(path ? `/nginx/files?path=${encodeURIComponent(path)}` : "/nginx/files");
+    navigate(`/nginx?files=${encodeURIComponent(path ?? "")}`);
+  };
+  const selectFile = (path: string | null) => {
+    navigate(`/nginx?files=${encodeURIComponent(path ?? "")}`, { replace: true });
+  };
+  const closeFiles = () => navigate("/nginx", { replace: true });
+  const reloadAll = () => {
+    sites.reload();
+    setRefreshKey(k => k + 1);
   };
 
   const openSite = (site: NginxSite, initialTab: "config" | "agent") => {
@@ -151,25 +169,6 @@ export default function NginxPage() {
     }
   };
 
-  if (isFilesView) {
-    return (
-      <NginxFilesView
-        caps={c}
-        sites={siteList}
-        initialPath={route.params.get("path")}
-        allowEdit={allowEdit}
-        ops={ops}
-        refreshKey={refreshKey}
-        onBack={() => navigate("/nginx")}
-        onSelectPath={p => openFiles(p ?? undefined)}
-        onReloadSites={() => {
-          sites.reload();
-          setRefreshKey(k => k + 1);
-        }}
-      />
-    );
-  }
-
   const nginxFindings = (findings.data ?? []).filter(f => f.category === "nginx" || f.category === "perf" || f.category === "cert");
 
   const columns: DataColumn<SiteRow>[] = [
@@ -228,18 +227,18 @@ export default function NginxPage() {
   return (
     <>
       <PageHeader title="nginx" description="按站点管理域名、反向代理、静态站点与 SSL 证书；站点内可直接向代理提问或由代理撰写配置">
-        {can(c, "nginx", "test") && <Button variant="secondary" loading={ops.busy === "nginx.test"} onClick={() => ops.run("nginx.test")}>检查配置</Button>}
-        {can(c, "nginx", "reload") && <Button variant="secondary" loading={ops.busy === "nginx.reload"} onClick={() => ops.run("nginx.reload")}>重新加载</Button>}
         <Button variant="secondary" onClick={() => openFiles()}>配置文件</Button>
         {allowManage && <Button onClick={() => { ops.setError(null); setDrawerTarget({ id: ++drawerSeqRef.current, mode: "create" }); }}>新建站点</Button>}
       </PageHeader>
 
       <OpsNotice caps={c} domain="nginx" source={sites.data?.source} />
       <SetupHint caps={c} />
-      {ops.error && !drawerTarget && !certSite && <Alert tone="danger" title="操作失败" onDismiss={() => ops.setError(null)}>{ops.error}</Alert>}
+      {ops.error && !drawerTarget && !certSite && !filesOpen && <Alert tone="danger" title="操作失败" onDismiss={() => ops.setError(null)}>{ops.error}</Alert>}
       {ops.job?.status === "running"
         ? <OpsJobLog id={ops.job.id} />
-        : ops.job && !(ops.job.dry_run && diffOf(ops.job)) && !drawerTarget && <Panel title="最近一次操作"><JobResult job={ops.job} onDismiss={() => ops.setJob(null)} /></Panel>}
+        : ops.job && !(ops.job.dry_run && diffOf(ops.job)) && !drawerTarget && !filesOpen && <Panel title="最近一次操作"><JobResult job={ops.job} onDismiss={() => ops.setJob(null)} /></Panel>}
+
+      <NginxServicePanel caps={c} ops={ops} refreshKey={refreshKey} onChanged={reloadAll} />
 
       <Section
         title="站点"
@@ -321,13 +320,22 @@ export default function NginxPage() {
         findings={nginxFindings}
         ops={ops}
         refreshKey={refreshKey}
-        onOpenFiles={p => { closeDrawer(); openFiles(p); }}
+        onOpenFiles={p => { setDrawerTarget(null); openFiles(p); }}
         onOpenCert={file => setCertFor(file)}
         onSaved={onSaved}
-        onChanged={() => {
-          sites.reload();
-          setRefreshKey(k => k + 1);
-        }}
+        onChanged={reloadAll}
+      />
+      <NginxFilesDialog
+        open={filesOpen}
+        onOpenChange={o => { if (!o) closeFiles(); }}
+        caps={c}
+        sites={siteList}
+        path={filesParam || null}
+        allowEdit={allowEdit}
+        ops={ops}
+        refreshKey={refreshKey}
+        onSelectPath={selectFile}
+        onReloadSites={reloadAll}
       />
       <CertDialog site={certSite} onOpenChange={o => { if (!o) setCertFor(null); }} caps={nginxCaps} ops={ops} onDone={afterChange} />
     </>
@@ -338,13 +346,17 @@ export default function NginxPage() {
 function SetupHint({ caps }: { caps: OpsCapabilities | undefined }) {
   const n = caps?.domains.nginx;
   if (!caps?.write_ready || !n?.enabled) return null;
-  const missing = ["manage", "cert"].filter(op => !n.allow.includes(op));
+  const missing = ["manage", "cert", "service", "install", "upgrade"].filter(op => !n.allow.includes(op));
   const acmeOff = n.allow.includes("cert") && n.acme && !n.acme.enabled;
   if (missing.length === 0 && !acmeOff) return null;
   const allow = [...new Set([...n.allow, ...missing])].map(a => `"${a}"`).join(", ");
-  const snippet = `[nginx]\nenabled = true\nallow = [${allow}]\n\n[nginx.acme]\nenabled = true\n# email = "ops@example.com"`;
+  const certHint = missing.includes("cert") || acmeOff;
+  const runtime = missing.includes("install") ? `\n# 运行方式：auto（默认）、host 或 docker\n# runtime = "auto"` : "";
+  const acme = certHint ? `\n\n[nginx.acme]\nenabled = true\n# email = "ops@example.com"` : "";
+  const snippet = `[nginx]\nenabled = true\nallow = [${allow}]${runtime}${acme}`;
+  const title = missing.includes("manage") ? "开启表单建站与证书管理" : certHint ? "开启自动申请证书" : "开启 nginx 服务、安装与版本管理";
   return (
-    <Alert tone="info" title={missing.includes("manage") ? "开启表单建站与证书管理" : "开启自动申请证书"}>
+    <Alert tone="info" title={title}>
       <p className={styles.textSecondary}>
         出于安全考虑，权限只能在服务器上修改。把下面的内容合并到 /etc/tsmonitor/helper.toml，然后执行 systemctl restart tsmonitor-helper。
       </p>

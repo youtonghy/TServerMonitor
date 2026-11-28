@@ -3,7 +3,7 @@
 import { ApiError, withSudo, type Api } from "./client";
 import type {
   AccessRange, AccessStats, AuditEntry, DockerImage, DockerInventory, DockerNetwork, DockerVolume, FirewallStatus,
-  CertInfo, NginxFile, NginxFileEntry, NginxSiteDetail, NginxSites, OpsCapabilities, SiteSpec, OpsJob, OpsRead, PendingChange, SshConfig, SshKeys, SshSession,
+  CertInfo, NginxFile, NginxFileEntry, NginxLogTail, NginxSiteDetail, NginxSites, NginxStatus, NginxVersions, OpsCapabilities, SiteSpec, OpsJob, OpsRead, PendingChange, SshConfig, SshKeys, SshSession,
   StreamEventMap, StreamEventName,
 } from "./types";
 
@@ -18,7 +18,7 @@ const caps: OpsCapabilities = {
   domains: {
     docker: { enabled: true, allow: ["start", "stop", "restart", "kill", "remove", "image_pull", "image_remove", "image_prune", "project"] },
     nginx: {
-      enabled: true, allow: ["test", "reload", "site", "edit", "manage", "cert"],
+      enabled: true, allow: ["test", "reload", "site", "edit", "manage", "cert", "service", "install", "upgrade"], runtime: "auto",
       site_roots: ["/var/www"], cert_paths: ["/etc/letsencrypt", "/etc/ssl"],
       acme: { enabled: true, staging: false, custom_directory: false, renew_days: 30 },
     },
@@ -66,6 +66,60 @@ const networks: DockerNetwork[] = [
   { id: "aa11bb22cc33", name: "bridge", driver: "bridge", scope: "local", internal: false },
   { id: "bb22cc33dd44", name: "shop_default", driver: "bridge", scope: "local", internal: false },
 ];
+
+// nginx runtime. Start in another state with ?nginx_runtime=docker or ?nginx_runtime=none before the hash,
+// e.g. http://localhost:5173/?nginx_runtime=none#/nginx (installing from "none" switches to docker).
+const NGINX_MODULES = ["http_ssl_module", "http_v2_module", "http_v3_module", "http_realip_module", "http_gzip_static_module", "http_stub_status_module", "http_sub_module", "stream", "stream_ssl_module", "threads"];
+const nginxDocker = (version: string, previous: string | null, uptimeSecs = 0): NginxStatus => ({
+  runtime: "docker", configured_runtime: "auto", installed: true, running: true, version, modules: NGINX_MODULES,
+  build: "built by gcc 12.2.0 (Debian 12.2.0-14); built with OpenSSL 3.0.15 3 Sep 2024", workers: 2,
+  started_at: Math.floor(Date.now() / 1000) - uptimeSecs, service: null,
+  container: { name: "tsmonitor-nginx", id: Math.random().toString(16).slice(2, 14), image: `nginx:${version}`, state: "running" },
+  package: null, previous_image: previous, install_blockers: [], docker_available: true,
+});
+const nginxHost = (): NginxStatus => ({
+  runtime: "host", configured_runtime: "auto", installed: true, running: true, version: "1.24.0", modules: NGINX_MODULES.filter(m => m !== "http_v3_module"),
+  build: "built with OpenSSL 3.0.13 30 Jan 2024", workers: 4, started_at: Math.floor(Date.now() / 1000) - 3 * 86_400 - 5 * 3_600,
+  service: "nginx.service", container: null, package: { manager: "apt", installed: "1.24.0-2ubuntu7.1", candidate: "1.24.0-2ubuntu7.3" },
+  previous_image: null, install_blockers: [], docker_available: true,
+});
+const nginxNone = (): NginxStatus => ({
+  runtime: "none", configured_runtime: "auto", installed: false, running: false, version: null, modules: [], build: null, workers: null,
+  started_at: null, service: null, container: null, package: null, previous_image: null, install_blockers: [], docker_available: true,
+});
+const startRuntime = typeof location === "undefined" ? null : new URLSearchParams(location.search).get("nginx_runtime");
+let nginx: NginxStatus = startRuntime === "docker" ? nginxDocker("1.26.3", null, 26 * 3_600) : startRuntime === "none" ? nginxNone() : nginxHost();
+const nginxVersions: NginxVersions = {
+  image: "nginx",
+  versions: [
+    { version: "1.29.1", channel: "mainline", latest: true },
+    { version: "1.29.0", channel: "mainline", latest: false },
+    { version: "1.28.0", channel: "stable", latest: true },
+    { version: "1.27.5", channel: "mainline", latest: false },
+    { version: "1.27.3", channel: "mainline", latest: false },
+    { version: "1.26.3", channel: "stable", latest: false },
+    { version: "1.26.2", channel: "stable", latest: false },
+    { version: "1.24.0", channel: "stable", latest: false },
+  ],
+};
+const nginxLog = (file: "error" | "access", lines: number): NginxLogTail => {
+  const t = (minsAgo: number) => new Date(Date.now() - minsAgo * MIN).toISOString().replace("T", " ").slice(0, 19).replaceAll("-", "/");
+  const all = file === "access"
+    ? Array.from({ length: 320 }, (_, i) => {
+      const paths = ["/", "/api/orders", "/static/app.js", "/wp-login.php", "/api/cart", "/.env"];
+      const p = paths[i % paths.length];
+      const code = p === "/.env" || p === "/wp-login.php" ? 404 : p === "/api/orders" && i % 7 === 0 ? 502 : 200;
+      return `203.0.113.${(i * 7) % 250} - - [${t(320 - i)}] "GET ${p} HTTP/1.1" ${code} ${(i * 131) % 9000} "-" "Mozilla/5.0" 0.0${i % 9}`;
+    })
+    : [
+      `${t(180)} [notice] 1#1: using the "epoll" event method`,
+      `${t(180)} [notice] 1#1: start worker processes`,
+      `${t(42)} [warn] 1234#1234: *881 an upstream response is buffered to a temporary file /var/cache/nginx/proxy_temp/1/00/0000000001 while reading upstream`,
+      `${t(17)} [error] 1234#1234: *1022 connect() failed (111: Connection refused) while connecting to upstream, client: 203.0.113.7, server: api.example.com, request: "GET /api/orders HTTP/1.1", upstream: "http://127.0.0.1:3000/api/orders"`,
+      `${t(3)} [error] 1234#1234: *1107 open() "/var/www/shop/.env" failed (2: No such file or directory), client: 198.51.100.23, server: shop.example.com, request: "GET /.env HTTP/1.1"`,
+    ];
+  return { path: `/var/log/nginx/${file}.log`, lines: all.slice(-lines), truncated: all.length > lines };
+};
 
 const files: Record<string, string> = {
   "nginx.conf": "user www-data;\nworker_processes auto;\n\nevents { worker_connections 1024; }\n\nhttp {\n    include mime.types;\n    log_format main '$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\" $request_time';\n    access_log /var/log/nginx/access.log main;\n    sendfile on;\n    keepalive_timeout 65;\n    include /etc/nginx/conf.d/*.conf;\n    include /etc/nginx/sites-enabled/*;\n}\n",
@@ -297,6 +351,68 @@ async function apply(emit: Emit, call: string, a: Record<string, unknown>, dry: 
     case "nginx.reload":
       if (dry) return { log: ["（演练模式）将执行 nginx -t，通过后重新加载 nginx"], result: { dry_run: true } };
       return { log: ["$ nginx -t", "nginx: configuration file /etc/nginx/nginx.conf test is successful", "$ systemctl reload nginx.service"], result: { reloaded: true } };
+    case "nginx.service": {
+      const action = str("action");
+      if (!["start", "stop", "restart"].includes(action)) return { log: [], error: `不支持的动作 ${action}` };
+      if (nginx.runtime === "none") return { log: [], error: "没有安装 nginx" };
+      const cmd = nginx.runtime === "docker" ? `$ docker ${action} ${nginx.container?.name}` : `$ systemctl ${action} nginx.service`;
+      const log = action === "stop" ? [cmd] : ["$ nginx -t", "nginx: configuration file /etc/nginx/nginx.conf test is successful", cmd];
+      if (dry) return { log: [...log, dryNote], result: { dry_run: true } };
+      const running = action !== "stop";
+      nginx = {
+        ...nginx, running, started_at: running ? Math.floor(Date.now() / 1000) : null, workers: running ? (nginx.runtime === "docker" ? 2 : 4) : null,
+        container: nginx.container && { ...nginx.container, state: running ? "running" : "exited" },
+      };
+      return { log: [...log, running ? "nginx 正在运行" : "nginx 已停止"], result: { running } };
+    }
+    case "nginx.install": {
+      const v = str("version");
+      if (nginx.runtime !== "none") return { log: [], error: "nginx 已安装" };
+      if (!/^\d+\.\d+\.\d+$/.test(v)) return { log: [], error: `版本号无效：${v}` };
+      const log = [
+        `$ docker pull nginx:${v}`, `${v}: Pulling from library/nginx`, `Status: Downloaded newer image for nginx:${v}`,
+        `$ docker run --rm -v /etc/nginx:/etc/nginx:ro nginx:${v} nginx -t`, "nginx: configuration file /etc/nginx/nginx.conf test is successful",
+        `$ docker run -d --name tsmonitor-nginx --network host --restart unless-stopped nginx:${v}`, "探测 http://127.0.0.1/ 通过",
+      ];
+      if (dry) return { log: [...log, dryNote], result: { dry_run: true } };
+      await new Promise(r => setTimeout(r, 1500));
+      nginx = nginxDocker(v, null);
+      return { log, result: { version: v, image: `nginx:${v}` } };
+    }
+    case "nginx.upgrade": {
+      if (nginx.runtime === "host") {
+        const p = nginx.package;
+        if (!p?.candidate || p.candidate === p.installed) return { log: [], error: "没有可用的软件包升级" };
+        const log = [
+          "$ apt-get install --only-upgrade -y nginx", `Unpacking nginx (${p.candidate}) over (${p.installed}) ...`, `Setting up nginx (${p.candidate}) ...`,
+          "$ nginx -t", "nginx: configuration file /etc/nginx/nginx.conf test is successful", "nginx 正在运行",
+        ];
+        if (dry) return { log: [...log, dryNote], result: { dry_run: true } };
+        await new Promise(r => setTimeout(r, 1200));
+        nginx = { ...nginx, package: { ...p, installed: p.candidate }, started_at: Math.floor(Date.now() / 1000) };
+        return { log, result: { installed: p.candidate } };
+      }
+      if (nginx.runtime !== "docker" || !nginx.container) return { log: [], error: "没有安装 nginx" };
+      const v = str("version");
+      if (!nginxVersions.versions.some(x => x.version === v)) return { log: [], error: `找不到版本 ${v}` };
+      const image = `nginx:${v}`;
+      const log = [`$ docker pull ${image}`, `Status: Downloaded newer image for ${image}`, `$ docker run --rm -v /etc/nginx:/etc/nginx:ro ${image} nginx -t`];
+      // 1.24 has no http3 directive: demonstrates the automatic revert.
+      if (v.startsWith("1.24")) return { log: [...log, "nginx: [emerg] unknown directive \"http3\" in /etc/nginx/sites-enabled/shop:4", "新镜像未通过 nginx -t，保持当前版本"], error: "新镜像未通过 nginx -t：unknown directive \"http3\"；已保持当前版本" };
+      log.push("nginx: configuration file /etc/nginx/nginx.conf test is successful", `替换容器 ${nginx.container.name}`, "探测 http://127.0.0.1/ 通过");
+      if (dry) return { log: [...log, dryNote], result: { dry_run: true } };
+      await new Promise(r => setTimeout(r, 1200));
+      nginx = nginxDocker(v, nginx.container.image);
+      return { log, result: { version: v, image } };
+    }
+    case "nginx.rollback": {
+      const prev = nginx.previous_image;
+      if (nginx.runtime !== "docker" || !prev) return { log: [], error: "没有可回退的版本" };
+      const log = [`$ docker run --rm -v /etc/nginx:/etc/nginx:ro ${prev} nginx -t`, "nginx: configuration file /etc/nginx/nginx.conf test is successful", `替换容器 ${nginx.container?.name}`, "探测 http://127.0.0.1/ 通过"];
+      if (dry) return { log: [...log, dryNote], result: { dry_run: true } };
+      nginx = nginxDocker(prev.replace(/^nginx:/, ""), null);
+      return { log, result: { image: prev } };
+    }
     case "nginx.site": {
       const name = str("name");
       const on = a.enabled === true;
@@ -550,6 +666,9 @@ export function opsMock(emit: Emit): Pick<Api, "accessHistory" | "opsCapabilitie
         case "docker.volumes": return ok(volumes);
         case "docker.networks": return ok(networks);
         case "nginx.sites": return ok(sites());
+        case "nginx.status": return ok(nginx);
+        case "nginx.versions": return ok(nginxVersions);
+        case "nginx.log_tail": return ok(nginxLog(params.file === "access" ? "access" : "error", Math.min(Number(params.lines) || 100, 1000)));
         case "nginx.files": return ok(Object.keys(files).sort().map((p): NginxFileEntry => ({ path: p, size: files[p].length, editable: editable(p) })));
         case "nginx.file": {
           const text = files[params.path ?? ""];
