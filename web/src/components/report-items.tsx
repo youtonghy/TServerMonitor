@@ -1,9 +1,11 @@
-import { useState, type FormEvent, type KeyboardEvent } from "react";
+import { useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { MessageCircleQuestion, PanelRightOpen, Sparkles, Wrench } from "lucide-react";
 import { Alert } from "@/components/arc/alert/alert";
 import { Badge, type BadgeTone } from "@/components/arc/badge/badge";
 import { Button } from "@/components/arc/button/button";
 import { Drawer, DrawerContent, useDrawerItem } from "@/components/arc/drawer/drawer";
 import { Textarea } from "@/components/arc/textarea/textarea";
+import { Tooltip } from "@/components/arc/tooltip/tooltip";
 import { ApiError, api } from "@/api/client";
 import { useStreamEvent } from "@/api/live";
 import type { ChangeRequest, Diagnosis, ItemIntent, ReportConversation, ReportConversations, ReportSection } from "@/api/types";
@@ -85,6 +87,17 @@ async function startThread(reportId: number, item: ItemRef, intent: ItemIntent, 
   return id;
 }
 
+/** A square icon button with its name in a tooltip and for screen readers. */
+function IconAction({ label, icon, loading, onClick }: { label: string; icon: ReactNode; loading?: boolean; onClick: () => void }) {
+  return (
+    <Tooltip content={label}>
+      <Button size="sm" variant="secondary" className={local.iconButton} aria-label={label} loading={loading} onClick={onClick}>
+        {icon}
+      </Button>
+    </Tooltip>
+  );
+}
+
 /** Buttons and live status under one report item. */
 export function ItemActions({ reportId, item, threads, onOpen }: {
   reportId: number; item: ItemRef; threads: Query<ReportConversations>; onOpen: (item: ItemRef) => void;
@@ -110,11 +123,11 @@ export function ItemActions({ reportId, item, threads, onOpen }: {
 
   return (
     <div className={local.actions}>
-      <span className={styles.row}>
-        <Button size="sm" variant="ghost" onClick={() => onOpen(item)}>详情</Button>
-        <Button size="sm" variant="ghost" loading={busy === "explain"} onClick={() => start("explain")}>让 Agent 解释</Button>
-        <Button size="sm" variant="ghost" onClick={() => onOpen(item)}>追问</Button>
-        <Button size="sm" variant="ghost" loading={busy === "fix"} onClick={() => start("fix")}>让 Agent 修复</Button>
+      <span className={local.tools} role="group" aria-label={`${item.title} 的操作`}>
+        <IconAction label="查看详情" icon={<PanelRightOpen />} onClick={() => onOpen(item)} />
+        <IconAction label="让 Agent 解释" icon={<Sparkles />} loading={busy === "explain"} onClick={() => void start("explain")} />
+        <IconAction label="追问" icon={<MessageCircleQuestion />} onClick={() => onOpen(item)} />
+        <IconAction label="让 Agent 修复" icon={<Wrench />} loading={busy === "fix"} onClick={() => void start("fix")} />
       </span>
       <span className={styles.row}>
         {latest && (

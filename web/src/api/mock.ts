@@ -349,7 +349,7 @@ const dims = (cpu: number, memory: number, disk: number, logs: number, security:
 const diagnoses: Record<number, Diagnosis> = {
   57: {
     health_score: 64,
-    summary: "PHP 应用在过去 20 分钟出现大量数据库连接被拒绝错误，直接原因是 MySQL 连接数接近上限且 queue-worker 重启循环占用连接。建议立即调高连接池上限并修复消息队列连接。",
+    summary: "PHP 应用在过去 20 分钟出现大量数据库连接被拒绝错误，健康评分降至 **64**。\n\n**现状**\n- MySQL 连接数 **148/151**，接近 `max_connections` 上限\n- `queue-worker` 处于重启循环，每次重启都占用新连接\n\n**建议**\n- 调高连接池上限\n- 修复消息队列连接后再观察 `php-fpm` 错误率",
     dimensions: dims(70, 66, 72, 31, 52, 48, 58),
     root_causes: [
       { title: "MySQL 连接数接近上限", evidence: "connections=148/151，PDOException 2002 在 18:05 后出现 18,204 次", confidence: "high" },

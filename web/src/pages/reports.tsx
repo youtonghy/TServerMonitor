@@ -9,6 +9,7 @@ import { useStreamEvent } from "@/api/live";
 import type { Diagnosis, Priority, Report, ReportKind, ReportSummary } from "@/api/types";
 import { useQuery } from "@/api/useQuery";
 import { PageHeader, Panel, Section, errorMessage, useNow } from "@/components/panel";
+import { Markdown } from "@/components/markdown";
 import { ItemActions, ItemDrawer, useReportThreads, type ItemRef } from "@/components/report-items";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import {
@@ -192,7 +193,7 @@ function Summary({ report }: { report: Report }) {
           <Badge size="sm" tone={scoreTone(report.health_score)}>健康评分 {report.health_score}</Badge>
         </div>
       </div>
-      <p className={styles.text}>{report.body.summary || report.summary}</p>
+      <Markdown text={report.body.summary || report.summary} />
       <p className={styles.textSecondary}>
         {formatDateTime(report.created_at)} 由{generatedByLabel[report.generated_by]}生成{report.model ? `（${report.model}）` : ""}
         {report.run_id && <> · <Link to={`/agent/${report.run_id}`}>查看运行过程</Link></>}

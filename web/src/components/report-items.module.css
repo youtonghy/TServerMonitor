@@ -4,8 +4,23 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 4px 12px;
-  margin-inline: -8px;
+  gap: 8px 12px;
+  margin-top: 2px;
+}
+
+.tools { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Square, filled icon buttons so the actions read as buttons without their labels. */
+button.iconButton {
+  width: var(--control-height-sm);
+  padding: 0;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  border-color: transparent;
+}
+button.iconButton svg { width: 16px; height: 16px; stroke-width: 1.75; }
+@media (hover: hover) and (pointer: fine) {
+  button.iconButton:hover:not(:disabled) { color: var(--foreground); background: color-mix(in oklab, var(--surface-muted), var(--foreground) 8%); border-color: var(--border); box-shadow: none; }
 }
 
 .statusLink {
