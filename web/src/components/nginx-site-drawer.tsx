@@ -1,4 +1,4 @@
-// Unified nginx site drawer: create/edit managed sites, edit manual sites, and chat with the Agent.
+// nginx site drawer: create/edit managed sites, edit manual sites, or (in its own mode) chat with the Agent.
 import { useState, type FormEvent, type ReactNode } from "react";
 import { Alert } from "@/components/arc/alert/alert";
 import { Badge } from "@/components/arc/badge/badge";
@@ -26,7 +26,8 @@ import styles from "./nginx-site.module.css";
 
 export type SiteDrawerTarget =
   | { id: number; mode: "create" }
-  | { id: number; mode: "site"; site: NginxSite; initialTab: "config" | "agent" };
+  | { id: number; mode: "site"; site: NginxSite }
+  | { id: number; mode: "agent"; site: NginxSite };
 
 interface Props {
   target: SiteDrawerTarget | null;
@@ -40,6 +41,8 @@ interface Props {
   refreshKey: number;
   onOpenFiles: (path: string) => void;
   onOpenCert: (file: string) => void;
+  onOpenSite: (site: NginxSite, mode: "site" | "agent") => void;
+  onDelete: (site: NginxSite) => void;
   onSaved: (spec: SiteSpec, job: OpsJob) => void;
   onChanged: () => void;
 }
@@ -51,7 +54,9 @@ export function SiteDrawer(props: Props) {
     ? "站点"
     : shown.mode === "create"
       ? "新建站点"
-      : `${shown.site.managed ? "站点" : "手动站点"} ${shown.site.name}`;
+      : shown.mode === "agent"
+        ? `代理助手 · ${shown.site.name}`
+        : `${shown.site.managed ? "站点" : "手动站点"} ${shown.site.name}`;
   const description = !shown
     ? undefined
     : shown.mode === "create"
@@ -75,6 +80,8 @@ export function SiteDrawer(props: Props) {
             onOpenChange={props.onOpenChange}
             onOpenFiles={props.onOpenFiles}
             onOpenCert={props.onOpenCert}
+            onOpenSite={props.onOpenSite}
+            onDelete={props.onDelete}
             onSaved={props.onSaved}
             onChanged={props.onChanged}
           />
@@ -96,11 +103,11 @@ function SiteDrawerBody({
   onOpenChange,
   onOpenFiles,
   onOpenCert,
+  onOpenSite,
+  onDelete,
   onSaved,
   onChanged,
 }: Omit<Props, "target"> & { target: SiteDrawerTarget }) {
-  const [tab, setTab] = useState<"config" | "agent">(target.mode === "site" ? target.initialTab : "config");
-
   if (target.mode === "create") {
     return (
       <SiteForm
@@ -116,59 +123,60 @@ function SiteDrawerBody({
   }
 
   const site = target.site;
+
+  if (target.mode === "agent") {
+    return (
+      <SiteAgentPanel
+        site={site}
+        onApplied={onChanged}
+        actions={<Button type="button" size="sm" variant="ghost" onClick={() => onOpenSite(site, "site")}>站点设置</Button>}
+      />
+    );
+  }
+
   const siteFindings = matchingFindings(findings, site);
+  const openAgent = () => onOpenSite(site, "agent");
 
   return (
     <div>
       <div className={styles.drawerTopBar}>
-        <SegmentedControl
-          label="站点视图"
-          value={tab}
-          onValueChange={v => setTab(v === "agent" ? "agent" : "config")}
-          options={[
-            { value: "config", label: site.managed ? "站点设置" : "站点配置" },
-            { value: "agent", label: "代理助手" },
-          ]}
-        />
+        <Button type="button" size="sm" variant="secondary" onClick={openAgent}>问代理</Button>
         <div className={styles.drawerTopActions}>
           {site.managed && site.cert && site.cert.mode !== "none" && (
             <Button type="button" size="sm" variant="ghost" onClick={() => onOpenCert(site.file)}>证书</Button>
           )}
           <Button type="button" size="sm" variant="ghost" onClick={() => onOpenFiles(site.file)}>配置文件</Button>
+          {site.managed && allowManage && (
+            <Button type="button" size="sm" variant="ghost" onClick={() => onDelete(site)}>删除站点</Button>
+          )}
         </div>
       </div>
 
-      <div hidden={tab !== "config"}>
-        {site.managed ? (
-          <ManagedSiteConfig
-            site={site}
-            findings={siteFindings}
-            caps={caps}
-            allowManage={allowManage}
-            allowCert={allowCert}
-            allowEdit={allowEdit}
-            ops={ops}
-            refreshKey={refreshKey}
-            onOpenChange={onOpenChange}
-            onSaved={onSaved}
-            onSwitchToAgent={() => setTab("agent")}
-          />
-        ) : (
-          <ManualSiteConfig
-            site={site}
-            findings={siteFindings}
-            allowEdit={allowEdit}
-            ops={ops}
-            refreshKey={refreshKey}
-            onChanged={onChanged}
-            onSwitchToAgent={() => setTab("agent")}
-          />
-        )}
-      </div>
-
-      <div hidden={tab !== "agent"}>
-        <SiteAgentPanel site={site} onApplied={onChanged} />
-      </div>
+      {site.managed ? (
+        <ManagedSiteConfig
+          site={site}
+          findings={siteFindings}
+          caps={caps}
+          allowManage={allowManage}
+          allowCert={allowCert}
+          allowEdit={allowEdit}
+          ops={ops}
+          refreshKey={refreshKey}
+          onOpenChange={onOpenChange}
+          onSaved={onSaved}
+          onAskAgent={openAgent}
+        />
+      ) : (
+        <ManualSiteConfig
+          site={site}
+          findings={siteFindings}
+          allowEdit={allowEdit}
+          ops={ops}
+          refreshKey={refreshKey}
+          onChanged={onChanged}
+          onAskAgent={openAgent}
+        />
+      )}
     </div>
   );
 }
@@ -216,7 +224,7 @@ function ManagedSiteConfig({
   refreshKey,
   onOpenChange,
   onSaved,
-  onSwitchToAgent,
+  onAskAgent,
 }: {
   site: NginxSite;
   findings: Finding[];
@@ -228,7 +236,7 @@ function ManagedSiteConfig({
   refreshKey: number;
   onOpenChange: (open: boolean) => void;
   onSaved: (spec: SiteSpec, job: OpsJob) => void;
-  onSwitchToAgent: () => void;
+  onAskAgent: () => void;
 }) {
   const detail = useQuery(
     () => (allowManage ? api.opsRead<NginxSiteDetail>("nginx.site_get", { name: site.name }) : Promise.resolve(null)),
@@ -239,9 +247,9 @@ function ManagedSiteConfig({
     return (
       <div className={styles.stackBody}>
         <SiteFacts site={site} />
-        <SiteFindings items={findings} onAsk={onSwitchToAgent} />
+        <SiteFindings items={findings} onAsk={onAskAgent} />
         <Alert tone="info" title="只读模式">
-          此主机未开启表单建站权限（helper.toml 的 [nginx] allow 需要包含 manage）。你仍可以在「代理助手」中向代理提问或查看完整配置文件。
+          此主机未开启表单建站权限（helper.toml 的 [nginx] allow 需要包含 manage）。你仍可以点「问代理」向代理提问，或查看完整配置文件。
         </Alert>
       </div>
     );
@@ -251,8 +259,8 @@ function ManagedSiteConfig({
     <QueryView query={detail} skeletonLines={8} errorTitle="无法读取站点设置">
       {d => d ? (
         <div className={styles.stackBody}>
-          <SiteFindings items={findings} onAsk={onSwitchToAgent} />
           <SiteForm
+            notice={<SiteFindings items={findings} onAsk={onAskAgent} />}
             key={d.data.sha256 ?? site.file}
             detail={d.data}
             caps={caps}
@@ -275,7 +283,7 @@ function ManualSiteConfig({
   ops,
   refreshKey,
   onChanged,
-  onSwitchToAgent,
+  onAskAgent,
 }: {
   site: NginxSite;
   findings: Finding[];
@@ -283,12 +291,10 @@ function ManualSiteConfig({
   ops: ReturnType<typeof useOpsAction>;
   refreshKey: number;
   onChanged: () => void;
-  onSwitchToAgent: () => void;
+  onAskAgent: () => void;
 }) {
   return (
     <div className={styles.stackBody}>
-      <SiteFacts site={site} />
-      <SiteFindings items={findings} onAsk={onSwitchToAgent} />
       <NginxFileEditor
         embedded
         path={site.file}
@@ -297,6 +303,8 @@ function ManualSiteConfig({
         refreshKey={refreshKey}
         onSaved={onChanged}
       />
+      <SiteFindings items={findings} onAsk={onAskAgent} />
+      <SiteFacts site={site} />
     </div>
   );
 }
@@ -337,9 +345,11 @@ interface SiteFormProps {
   ops: ReturnType<typeof useOpsAction>;
   onOpenChange: (open: boolean) => void;
   onSaved: (spec: SiteSpec, job: OpsJob) => void;
+  /** Rendered right below the Agent drafting box, e.g. findings for this site. */
+  notice?: ReactNode;
 }
 
-function SiteForm({ onOpenChange, detail, caps, allowCert, allowEdit, ops, onSaved }: SiteFormProps) {
+function SiteForm({ onOpenChange, detail, caps, allowCert, allowEdit, ops, onSaved, notice }: SiteFormProps) {
   const editing = detail !== null;
   const [spec, setSpec] = useState<SiteSpec>(() => (detail ? structuredClone(detail.spec) : defaultSpec()));
   const [domainsText, setDomainsText] = useState(() => (detail ? detail.spec.domains.join("\n") : ""));
@@ -420,14 +430,6 @@ function SiteForm({ onOpenChange, detail, caps, allowCert, allowEdit, ops, onSav
 
   return (
     <form className={styles.form} onSubmit={review}>
-      {detail?.drifted && (
-        <Alert tone="warning" title="配置文件被手动修改过">
-          保存会用表单内容重新生成 {detail.file}，手动修改将丢失（预览中可以看到）。
-          <Switch label="确认覆盖手动修改" checked={overwrite} onCheckedChange={setOverwrite} />
-        </Alert>
-      )}
-      {ops.error && <Alert tone="danger" title="无法保存" onDismiss={() => ops.setError(null)}>{ops.error}</Alert>}
-
       <NginxDraftBox
         mode="site"
         siteName={editing || (nameTouched && spec.name) ? spec.name : undefined}
@@ -439,6 +441,15 @@ function SiteForm({ onOpenChange, detail, caps, allowCert, allowEdit, ops, onSav
         canUndo={undoSpec !== null}
         onUndo={undoDraft}
       />
+
+      {notice}
+      {detail?.drifted && (
+        <Alert tone="warning" title="配置文件被手动修改过">
+          保存会用表单内容重新生成 {detail.file}，手动修改将丢失（预览中可以看到）。
+          <Switch label="确认覆盖手动修改" checked={overwrite} onCheckedChange={setOverwrite} />
+        </Alert>
+      )}
+      {ops.error && <Alert tone="danger" title="无法保存" onDismiss={() => ops.setError(null)}>{ops.error}</Alert>}
 
       <section className={styles.group}>
         <h3 className={styles.groupTitle}>基本信息</h3>

@@ -18,7 +18,7 @@ import { SiteDrawer, type SiteDrawerTarget } from "@/components/nginx-site-drawe
 import { JobResult, OpsNotice, can, diffOf, useOpsAction, useOpsCaps } from "@/components/ops";
 import { PageHeader, Panel, Section, errorMessage, useNow } from "@/components/panel";
 import { findingSeverityLabel, findingSeverityTone } from "@/lib/labels";
-import { certStatus, covers, formatListen, formatSiteDomains, siteKindLabel } from "@/lib/nginx-site";
+import { certStatus, covers, formatListen, formatListenCompact, formatSiteDomains, siteKindLabel } from "@/lib/nginx-site";
 import { navigate, useRoute } from "@/lib/router";
 import siteStyles from "@/components/nginx-site.module.css";
 import styles from "./pages.module.css";
@@ -59,7 +59,7 @@ export default function NginxPage() {
 
   // Keep the open site drawer reflecting fresh site state (cert, enabled, target) after reloads.
   const liveDrawerTarget: SiteDrawerTarget | null = useMemo(
-    () => (drawerTarget?.mode === "site"
+    () => (drawerTarget && drawerTarget.mode !== "create"
       ? {
           ...drawerTarget,
           site: siteList.find(s => s.file === drawerTarget.site.file) ?? drawerTarget.site,
@@ -76,7 +76,7 @@ export default function NginxPage() {
   });
 
   const siteParam = route.params.get("site");
-  const tabParam = route.params.get("tab") === "agent" ? "agent" : "config";
+  const tabParam = route.params.get("tab") === "agent" ? "agent" : "site";
   const linkKey = siteParam ? `${siteParam}:${tabParam}` : null;
 
   // Old full-page route /nginx/files?path=X now opens the dialog.
@@ -94,7 +94,7 @@ export default function NginxPage() {
     const match = siteList.find(s => s.name === siteParam);
     if (match) {
       consumedLinkRef.current = linkKey;
-      setDrawerTarget({ id: ++drawerSeqRef.current, mode: "site", site: match, initialTab: tabParam });
+      setDrawerTarget({ id: ++drawerSeqRef.current, mode: tabParam, site: match });
     }
   }, [linkKey, siteList, siteParam, tabParam]);
 
@@ -110,9 +110,10 @@ export default function NginxPage() {
     setRefreshKey(k => k + 1);
   };
 
-  const openSite = (site: NginxSite, initialTab: "config" | "agent") => {
+  // Site settings and the Agent assistant are separate drawers; each can switch to the other.
+  const openSite = (site: NginxSite, mode: "site" | "agent" = "site") => {
     ops.setError(null);
-    setDrawerTarget({ id: ++drawerSeqRef.current, mode: "site", site, initialTab });
+    setDrawerTarget({ id: ++drawerSeqRef.current, mode, site });
   };
 
   const closeDrawer = () => {
@@ -174,8 +175,8 @@ export default function NginxPage() {
   const columns: DataColumn<SiteRow>[] = [
     {
       key: "name", label: "站点", sortable: true, render: (_v, r) => (
-        <button type="button" className={siteStyles.siteNameButton} onClick={() => openSite(r, "config")} aria-label={`查看或管理站点 ${r.name}`}>
-          <span className={styles.row}>
+        <button type="button" className={siteStyles.siteNameButton} onClick={() => openSite(r)} aria-label={`查看或管理站点 ${r.name}`}>
+          <span className={siteStyles.siteNameRow}>
             <code className={styles.code}>{r.name}</code>
             {r.managed ? <Badge size="sm" tone="info">{siteKindLabel[r.kind ?? "proxy"]}</Badge> : <Badge size="sm" tone="neutral" outline>手动</Badge>}
             {r.drifted && <Badge size="sm" tone="warning">已手动修改</Badge>}
@@ -186,9 +187,9 @@ export default function NginxPage() {
     },
     {
       key: "names", label: "域名与端口", render: (_v, r) => (
-        <div>
-          <div className={styles.small}>{formatSiteDomains(r.server_names)}</div>
-          <div className={siteStyles.subMeta}>{formatListen(r.listen)}</div>
+        <div className={siteStyles.domainCell}>
+          <span className={siteStyles.domainNames} title={formatSiteDomains(r.server_names)}>{formatSiteDomains(r.server_names)}</span>
+          <span className={siteStyles.subMeta} title={formatListen(r.listen)}>{formatListenCompact(r.listen)}</span>
         </div>
       ),
     },
@@ -210,15 +211,11 @@ export default function NginxPage() {
         : <Badge size="sm" tone={r.enabled ? "success" : "neutral"} dot>{r.enabled ? "已启用" : "已停用"}</Badge>,
     },
     {
+      // Certificates, config files and delete live in the site drawer header to keep rows on one line.
       key: "file", label: "", render: (_v, r) => (
         <span className={siteStyles.siteActions}>
-          {r.managed
-            ? (allowManage && <Button size="sm" variant="ghost" onClick={() => openSite(r, "config")}>编辑</Button>)
-            : <Button size="sm" variant="ghost" onClick={() => openSite(r, "config")}>管理</Button>}
+          <Button size="sm" variant="ghost" onClick={() => openSite(r)}>{r.managed && allowManage ? "编辑" : "管理"}</Button>
           <Button size="sm" variant="ghost" onClick={() => openSite(r, "agent")}>问代理</Button>
-          {r.managed && r.cert && r.cert.mode !== "none" && <Button size="sm" variant="ghost" onClick={() => setCertFor(r.file)}>证书</Button>}
-          <Button size="sm" variant="ghost" onClick={() => openFiles(r.file)}>配置文件</Button>
-          {r.managed && allowManage && <Button size="sm" variant="ghost" onClick={() => { setPurge(false); setRemove(r); }}>删除</Button>}
         </span>
       ),
     },
@@ -226,7 +223,7 @@ export default function NginxPage() {
 
   return (
     <>
-      <PageHeader title="nginx" description="按站点管理域名、反向代理、静态站点与 SSL 证书；站点内可直接向代理提问或由代理撰写配置">
+      <PageHeader title="nginx" description="按站点管理域名、反向代理、静态站点与 SSL 证书；编辑站点时可由代理撰写配置，「问代理」打开独立的代理助手">
         <Button variant="secondary" onClick={() => openFiles()}>配置文件</Button>
         {allowManage && <Button onClick={() => { ops.setError(null); setDrawerTarget({ id: ++drawerSeqRef.current, mode: "create" }); }}>新建站点</Button>}
       </PageHeader>
@@ -242,7 +239,7 @@ export default function NginxPage() {
 
       <Section
         title="站点"
-        description={sites.data ? (sites.data.data.layout === "sites_enabled" ? "sites-available / sites-enabled 布局 · 点击站点进入配置与代理助手" : "conf.d 布局（停用 = 改名为 .conf.disabled）· 点击站点进入配置与代理助手") : undefined}
+        description={sites.data ? (sites.data.data.layout === "sites_enabled" ? "sites-available / sites-enabled 布局 · 点击站点查看与编辑" : "conf.d 布局（停用 = 改名为 .conf.disabled）· 点击站点查看与编辑") : undefined}
         query={sites}
         flush
         isEmpty={d => d.data.sites.length === 0}
@@ -322,6 +319,8 @@ export default function NginxPage() {
         refreshKey={refreshKey}
         onOpenFiles={p => { setDrawerTarget(null); openFiles(p); }}
         onOpenCert={file => setCertFor(file)}
+        onOpenSite={openSite}
+        onDelete={site => { closeDrawer(); setPurge(false); setRemove({ ...site, names: site.server_names.join(" ") }); }}
         onSaved={onSaved}
         onChanged={reloadAll}
       />

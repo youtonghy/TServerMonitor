@@ -69,3 +69,22 @@ export function formatListen(listen: string[]): string {
   if (listen.length === 0) return "—";
   return [...new Set(listen)].join(" · ");
 }
+
+/**
+ * One-line listen summary for tables: IPv4/IPv6 duplicates of the same port merge and
+ * `default_server` becomes a trailing "默认" marker. The full list stays in formatListen.
+ */
+export function formatListenCompact(listen: string[]): string {
+  if (listen.length === 0) return "—";
+  let isDefault = false;
+  const parts: string[] = [];
+  for (const raw of listen) {
+    const words = raw.trim().split(/\s+/);
+    if (words.includes("default_server")) isDefault = true;
+    const addr = (words[0] ?? "").replace(/^\[::\]:/, "").replace(/^0\.0\.0\.0:/, "");
+    const flags = words.slice(1).filter(w => w === "ssl" || w === "quic");
+    const label = [addr, ...flags].join(" ");
+    if (label && !parts.includes(label)) parts.push(label);
+  }
+  return parts.join(" · ") + (isDefault ? " · 默认" : "");
+}

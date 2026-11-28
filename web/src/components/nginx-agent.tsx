@@ -1,5 +1,5 @@
 // In-site Agent helpers: structured config/site drafting box and live site assistant chat.
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { Sparkles } from "lucide-react";
 import { Alert } from "@/components/arc/alert/alert";
 import { Badge } from "@/components/arc/badge/badge";
@@ -163,14 +163,16 @@ export function NginxDraftBox({
   );
 }
 
-// ---------------------------------------------------------------- site assistant chat
+// ---------------------------------------------------------------- site assistant chat (its own drawer)
 
 interface SiteAgentPanelProps {
   site: NginxSite;
   onApplied?: () => void;
+  /** Extra buttons at the end of the toolbar, e.g. a link back to the site settings. */
+  actions?: ReactNode;
 }
 
-export function SiteAgentPanel({ site, onApplied }: SiteAgentPanelProps) {
+export function SiteAgentPanel({ site, onApplied, actions }: SiteAgentPanelProps) {
   const now = useNow(5_000);
   const threads = useQuery(() => api.nginxSiteConversations(site.name), [site.name]);
   const [pickedId, setPickedId] = useState<string | null>(null);
@@ -273,6 +275,7 @@ export function SiteAgentPanel({ site, onApplied }: SiteAgentPanelProps) {
               <Link className={`${pageStyles.small}`} to={`/agent/${activeId}`}>完整对话</Link>
             </>
           )}
+          {actions}
         </div>
       </div>
 
