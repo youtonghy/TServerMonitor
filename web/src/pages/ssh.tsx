@@ -13,7 +13,7 @@ import type { SshConfig, SshKey, SshKeys, SshSession } from "@/api/types";
 import { useQuery } from "@/api/useQuery";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { JobResult, OpsNotice, can, diffOf, useOpsAction, useOpsCaps } from "@/components/ops";
-import { Facts, PageHeader, Panel, Section } from "@/components/panel";
+import { Facts, PageHeader, Panel, QueryView, Section } from "@/components/panel";
 import { findingSeverityLabel, findingSeverityTone } from "@/lib/labels";
 import opsStyles from "@/components/ops.module.css";
 import styles from "./pages.module.css";
@@ -51,6 +51,8 @@ export default function SshPage() {
   const [preview, setPreview] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<SshKey | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [keysOpen, setKeysOpen] = useState(false);
 
   const c = caps.data;
   const cfg = config.data?.data;
@@ -84,71 +86,25 @@ export default function SshPage() {
   ];
   const loginFindings = (findings.data ?? []).filter(f => f.category === "login" || f.title.includes("SSH"));
 
+  // Operation feedback follows the user: inside whichever dialog is open, otherwise on the page.
+  const feedback = (
+    <>
+      {ops.error && <Alert tone="danger" title="操作失败" onDismiss={() => ops.setError(null)}>{ops.error}</Alert>}
+      {ops.job && !(ops.job.dry_run && diffOf(ops.job)) && <JobResult job={ops.job} onDismiss={() => ops.setJob(null)} />}
+    </>
+  );
+  const inDialog = settingsOpen || keysOpen;
+
   return (
     <>
-      <PageHeader title="SSH" description="sshd 设置、授权公钥与登录会话；sshd 修改需在倒计时内确认，否则自动回滚">
-        {can(c, "ssh", "key_add") && <Button onClick={() => setAdding(true)}>添加公钥</Button>}
+      <PageHeader title="SSH" description="当前登录会话与登录风险；sshd 设置和授权公钥在右上角管理">
+        <Button variant="secondary" onClick={() => setKeysOpen(true)}>授权公钥</Button>
+        <Button onClick={() => setSettingsOpen(true)}>设置</Button>
       </PageHeader>
 
       <OpsNotice caps={c} domain="ssh" source={config.data?.source} />
-      {ops.error && <Alert tone="danger" title="操作失败" onDismiss={() => ops.setError(null)}>{ops.error}</Alert>}
-      {ops.job && !(ops.job.dry_run && diffOf(ops.job)) && <Panel title="最近一次操作"><JobResult job={ops.job} onDismiss={() => ops.setJob(null)} /></Panel>}
-
-      <Section title="sshd" query={config} errorTitle="无法读取 sshd 配置">
-        {d => (
-          <div className={styles.stack}>
-            <Facts items={[
-              { label: "监听端口", value: d.data.ports.join(", ") },
-              { label: "服务", value: d.data.unit ?? "—" },
-              { label: "按需启动（ssh.socket）", value: d.data.socket_activated ? "是" : "否" },
-              { label: "面板写入的文件", value: d.data.dropin ? <code className={styles.code}>{d.data.dropin}</code> : "—" },
-            ]} />
-            {!d.data.available && <Alert tone="info" title="仅显示配置文件">需要运维助手执行 sshd -T 才能看到生效值；当前只解析了 sshd_config 中的端口。</Alert>}
-            {d.data.available && !d.data.includes_dropins && <Alert tone="warning" title="无法通过面板修改">sshd_config 没有在 Match 之前 Include sshd_config.d/*.conf，面板写入的设置不会生效。</Alert>}
-          </div>
-        )}
-      </Section>
-
-      {cfg?.available && (
-        <Panel
-          title="登录与安全选项"
-          description="写入独立的 drop-in 文件；保存前执行 sshd -t 并核对生效值，会锁死登录的组合会被拒绝"
-          actions={allowOptions && <Button size="sm" disabled={pending.length === 0} loading={ops.busy === "ssh.set"} onClick={reviewOptions}>预览并应用{pending.length ? `（${pending.length}）` : ""}</Button>}
-        >
-          <ul className={styles.list}>
-            {cfg.options.map(o => {
-              const cur = current(cfg, o.key);
-              const managed = cfg.managed[o.key];
-              return (
-                <li key={o.key} className={local.providerRow}>
-                  <div className={local.providerMain}>
-                    <span className={styles.row}>
-                      <code className={styles.code}>{o.key}</code>
-                      {managed !== undefined && <Badge size="sm" tone="info" outline>面板设置</Badge>}
-                    </span>
-                    <span className={`${styles.small} ${styles.muted}`}>{OPTION_HINT[o.key] ?? ""} · 当前 {cur ?? "未知"}</span>
-                  </div>
-                  {allowOptions && (o.values.length > 0
-                    ? <div className={`${local.inlineSelect} ${local.optionControl}`}><Select label={o.key} value={changes[o.key] ?? cur ?? ""} onValueChange={v => setChanges(x => ({ ...x, [o.key]: v }))} options={o.values.map(v => ({ value: v, label: v }))} /></div>
-                    : <div className={`${local.inlineSelect} ${local.optionControl}`}><Input label={o.key} inputMode="numeric" value={changes[o.key] ?? cur ?? ""} onChange={e => setChanges(x => ({ ...x, [o.key]: e.target.value.replace(/\D/g, "") }))} /></div>)}
-                </li>
-              );
-            })}
-          </ul>
-        </Panel>
-      )}
-
-      <Section
-        title="授权公钥"
-        description="各登录用户的 ~/.ssh/authorized_keys；带 from= / command= 等限制的条目只显示不修改"
-        query={keys}
-        flush
-        isEmpty={d => d.data.keys.length === 0}
-        empty={{ title: "没有公钥", description: "登录用户都还没有配置公钥。" }}
-        errorTitle="无法读取公钥"
-      >
-        {d => <SortableDataTable<KeyRow> rows={d.data.keys as KeyRow[]} columns={keyColumns} rowKey={r => `${r.user}:${r.fingerprint}`} caption="授权公钥" />}
-      </Section>
+      {!inDialog && ops.error && <Alert tone="danger" title="操作失败" onDismiss={() => ops.setError(null)}>{ops.error}</Alert>}
+      {!inDialog && ops.job && !(ops.job.dry_run && diffOf(ops.job)) && <Panel title="最近一次操作"><JobResult job={ops.job} onDismiss={() => ops.setJob(null)} /></Panel>}
 
       <div className={styles.grid2}>
         <Section title="当前会话" query={sessions} flush isEmpty={d => d.length === 0} empty={{ title: "没有登录会话", description: "who 没有返回任何会话。" }}>
@@ -167,6 +123,66 @@ export default function SshPage() {
           )}
         </Section>
       </div>
+
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent title="SSH 设置" description="写入独立的 drop-in 文件；保存前执行 sshd -t 并核对生效值，会锁死登录的组合会被拒绝。应用后需在倒计时内确认，否则自动回滚。" className={opsStyles.wide}>
+          <div className={styles.stack}>
+            {feedback}
+            <QueryView query={config} errorTitle="无法读取 sshd 配置">
+              {d => (
+                <div className={styles.stack}>
+                  <Facts items={[
+                    { label: "监听端口", value: d.data.ports.join(", ") },
+                    { label: "服务", value: d.data.unit ?? "—" },
+                    { label: "按需启动（ssh.socket）", value: d.data.socket_activated ? "是" : "否" },
+                    { label: "面板写入的文件", value: d.data.dropin ? <code className={styles.code}>{d.data.dropin}</code> : "—" },
+                  ]} />
+                  {!d.data.available && <Alert tone="info" title="仅显示配置文件">需要运维助手执行 sshd -T 才能看到生效值；当前只解析了 sshd_config 中的端口。</Alert>}
+                  {d.data.available && !d.data.includes_dropins && <Alert tone="warning" title="无法通过面板修改">sshd_config 没有在 Match 之前 Include sshd_config.d/*.conf，面板写入的设置不会生效。</Alert>}
+                  {d.data.available && (
+                    <ul className={styles.list}>
+                      {d.data.options.map(o => {
+                        const cur = current(d.data, o.key);
+                        const managed = d.data.managed[o.key];
+                        return (
+                          <li key={o.key} className={local.providerRow}>
+                            <div className={local.providerMain}>
+                              <span className={styles.row}>
+                                <code className={styles.code}>{o.key}</code>
+                                {managed !== undefined && <Badge size="sm" tone="info" outline>面板设置</Badge>}
+                              </span>
+                              <span className={`${styles.small} ${styles.muted}`}>{OPTION_HINT[o.key] ?? ""} · 当前 {cur ?? "未知"}</span>
+                            </div>
+                            {allowOptions && (o.values.length > 0
+                              ? <div className={`${local.inlineSelect} ${local.optionControl}`}><Select label={o.key} value={changes[o.key] ?? cur ?? ""} onValueChange={v => setChanges(x => ({ ...x, [o.key]: v }))} options={o.values.map(v => ({ value: v, label: v }))} /></div>
+                              : <div className={`${local.inlineSelect} ${local.optionControl}`}><Input label={o.key} inputMode="numeric" value={changes[o.key] ?? cur ?? ""} onChange={e => setChanges(x => ({ ...x, [o.key]: e.target.value.replace(/\D/g, "") }))} /></div>)}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </QueryView>
+            <div className={local.actions}>
+              <Button variant="ghost" onClick={() => setSettingsOpen(false)}>关闭</Button>
+              {allowOptions && <Button disabled={pending.length === 0} loading={ops.busy === "ssh.set"} onClick={reviewOptions}>预览并应用{pending.length ? `（${pending.length}）` : ""}</Button>}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={keysOpen} onOpenChange={setKeysOpen}>
+        <DialogContent title="授权公钥" description="各登录用户的 ~/.ssh/authorized_keys；带 from= / command= 等限制的条目只显示不修改。" className={opsStyles.wide}>
+          <div className={styles.stack}>
+            {feedback}
+            {can(c, "ssh", "key_add") && <div className={local.actions}><Button onClick={() => setAdding(true)}>添加公钥</Button></div>}
+            <QueryView query={keys} isEmpty={d => d.data.keys.length === 0} empty={{ title: "没有公钥", description: "登录用户都还没有配置公钥。" }} errorTitle="无法读取公钥">
+              {d => <SortableDataTable<KeyRow> rows={d.data.keys as KeyRow[]} columns={keyColumns} rowKey={r => `${r.user}:${r.fingerprint}`} caption="授权公钥" />}
+            </QueryView>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <ConfirmDialog
         open={preview !== null}
