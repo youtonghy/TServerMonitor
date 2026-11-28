@@ -30,6 +30,7 @@ export default function FirewallPage() {
   const [adding, setAdding] = useState<NewFirewallRule | null>(null);
   const [deleting, setDeleting] = useState<FirewallRule | null>(null);
   const [toggling, setToggling] = useState(false);
+  const [showRaw, setShowRaw] = useState(false);
 
   const c = caps.data;
   const st = status.data?.data;
@@ -58,6 +59,7 @@ export default function FirewallPage() {
     <>
       <PageHeader title="防火墙" description="ufw / firewalld 规则管理；每次修改都需在倒计时内确认，否则自动回滚">
         {allowToggle && st && <Button variant={st.active ? "secondary" : "primary"} onClick={() => setToggling(true)}>{st.active ? "停用 ufw" : "启用 ufw"}</Button>}
+        {st?.raw && <Button variant="secondary" onClick={() => setShowRaw(true)}>原始规则</Button>}
         {allowAdd && <Button onClick={() => setAdding({ action: "allow", port: "", proto: "tcp", from: "" })}>添加规则</Button>}
       </PageHeader>
 
@@ -86,7 +88,7 @@ export default function FirewallPage() {
         query={status}
         flush
         isEmpty={d => d.data.rules.length === 0}
-        empty={{ title: "没有规则", description: writable ? "还没有用户规则。" : "此后端仅支持查看，请参考下方原始规则。" }}
+        empty={{ title: "没有规则", description: writable ? "还没有用户规则。" : "此后端仅支持查看，请点击右上角「原始规则」查看。" }}
       >
         {d => <SortableDataTable<Row> rows={d.data.rules as Row[]} columns={columns} rowKey="spec" caption="防火墙规则" />}
       </Section>
@@ -107,11 +109,11 @@ export default function FirewallPage() {
         </Panel>
       )}
 
-      {st?.raw && (
-        <Panel title="原始规则" description={`${st.backend} 的当前输出`}>
-          <CodeBlock code={st.raw} language="log" filename={`${st.backend}.txt`} maxLines={16} />
-        </Panel>
-      )}
+      <Dialog open={showRaw && Boolean(st?.raw)} onOpenChange={setShowRaw}>
+        <DialogContent title="原始规则" description={`${st?.backend ?? ""} 的当前输出`} className={opsStyles.wide}>
+          {st?.raw && <CodeBlock code={st.raw} language="log" filename={`${st.backend}.txt`} maxLines={24} />}
+        </DialogContent>
+      </Dialog>
 
       <RuleDialog rule={adding} onClose={() => setAdding(null)} onSubmit={r => done(ops.run("firewall.add", { ...r, from: r.from || null }))} />
       <ConfirmDialog
