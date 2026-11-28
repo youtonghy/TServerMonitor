@@ -273,7 +273,7 @@ function InstallDialog({ open, onOpenChange, ...props }: InstallDialogProps) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title="用 Docker 安装 nginx"
-        description="拉取官方 nginx 镜像并以容器运行，沿用 /etc/nginx 中的配置；安装后即可在这里管理站点。"
+        description="拉取官方 nginx 镜像并以容器运行，配置放在宿主机 /etc/nginx（为空时从镜像复制默认配置）；安装后即可在这里管理站点。"
         className={opsStyles.wide}
       >
         <InstallBody {...props} onCancel={() => onOpenChange(false)} />
