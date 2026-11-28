@@ -24,6 +24,24 @@ pub fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Flattens the light Markdown the AI writes in report summaries (bold, inline code, bullets,
+/// headings) into plain text for chat messages.
+pub fn plain_markdown(s: &str) -> String {
+    s.lines()
+        .map(|line| {
+            let line = line.trim_end().replace("**", "").replace('`', "");
+            let indent = line.len() - line.trim_start().len();
+            let body = line.trim_start().trim_start_matches('#').trim_start();
+            let body = match body.strip_prefix("- ").or_else(|| body.strip_prefix("* ")) {
+                Some(item) => format!("• {item}"),
+                None => body.to_string(),
+            };
+            format!("{}{body}", &line[..indent])
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn sev_icon(s: &str) -> &'static str {
     match s {
         "critical" => "🔴",
@@ -61,7 +79,7 @@ pub fn format_report(host: &str, r: &ReportSummary, d: &Diagnosis) -> String {
         } else {
             "规则"
         },
-        escape_html(&d.summary)
+        escape_html(&plain_markdown(&d.summary))
     );
     if !d.recommendations.is_empty() {
         t.push_str("\n\n<b>优先建议</b>");
@@ -400,6 +418,15 @@ pub fn sign(key: &[u8], body: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_markdown_strips_markers() {
+        let md = "结论：**平稳**。\n**待关注**\n- `nginx` 日志为空\n  * 子项";
+        assert_eq!(
+            plain_markdown(md),
+            "结论：平稳。\n待关注\n• nginx 日志为空\n  • 子项"
+        );
+    }
 
     #[test]
     fn hmac_matches_known_vector() {

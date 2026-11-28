@@ -21,6 +21,7 @@ pub const SYSTEM: &str = r#"你是 TServerMonitor 的运维分析参谋，一个
 - 需要做聚合统计（如按 URL/错误类型/时间段统计、找出慢查询模式）时，可以先 export_log_sample 导出样本，再 write_script + run_python 运行仅使用标准库的脚本。
 - 结论必须有证据：引用具体的数字、时间、日志模板、容器名或配置项。没有证据的推测要把 confidence 设为 low。
 - 建议要具体到可执行的层面（哪个文件/配置项/参数/SQL/代码位置，改成什么），但只给建议，不执行。
+- summary 用 Markdown 排版，便于面板直接渲染：第一行用一句话给出结论；随后按需分成“**现状**”“**待关注**”“**建议**”等粗体小标题，每个小标题下用 `- ` 列表逐条写，每条一句、只写一个要点；关键数字用 **粗体**，容器名、文件、配置项、命令用 `行内代码`。不要写成一整段长文，不要使用标题（#）、表格、链接或 HTML，总长度控制在约 12 行以内；细节放进 root_causes、recommendations 等字段，不要在 summary 里重复展开。
 - 全部使用简体中文输出。health_score 与各维度评分为 0~100，越高越健康。没有问题的维度给高分，不要凭空编造问题；数组可以为空。"#;
 
 /// Task text for a run; a configured task brings its own prompt from the library.

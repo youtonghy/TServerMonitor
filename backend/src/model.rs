@@ -363,7 +363,9 @@ pub struct Anomaly {
 pub struct Diagnosis {
     /// Overall health 0-100, higher is healthier.
     pub health_score: f64,
-    /// Two to five sentences in Chinese for the operator.
+    /// Chinese summary for the operator, in Markdown: a one-sentence conclusion first, then short
+    /// `- ` bullet lists under `**粗体小标题**` (现状 / 待关注 / 建议), key numbers in `**bold**`,
+    /// identifiers in `code`. No headings, tables, links or HTML; at most about 12 lines.
     pub summary: String,
     /// Per-dimension health 0-100.
     pub dimensions: HealthDimensions,

@@ -235,7 +235,7 @@ async fn latest_report(state: &Shared) -> String {
                 "<b>{}</b>\n健康评分：{:.0}\n{}",
                 escape_html(&r.title),
                 r.health_score,
-                escape_html(&r.summary)
+                escape_html(&crate::notify::plain_markdown(&r.summary))
             ),
             None => "还没有报告".into(),
         },
