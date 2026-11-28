@@ -1,5 +1,6 @@
 //! Docker domain: lifecycle of existing containers, compose projects by label, images and
-//! volumes. There is deliberately no exec, no create and no arbitrary bind mount.
+//! volumes. There is deliberately no exec, no create and no arbitrary bind mount here; the
+//! only containers the helper creates are nginx's, in fixed shape (`nginx_docker`).
 
 use bollard::Docker;
 use bollard::query_parameters::{
@@ -17,7 +18,7 @@ use crate::ops::docker as inv;
 use crate::ops::proto::{OpError, OpResult};
 use crate::ops::validate;
 
-fn connect(ctx: &Ctx) -> OpResult<Docker> {
+pub(super) fn connect(ctx: &Ctx) -> OpResult<Docker> {
     let path = ctx.cfg.docker.socket.to_string_lossy();
     Docker::connect_with_unix(&path, 120, bollard::API_DEFAULT_VERSION)
         .map_err(|e| OpError::failed(format!("连接 Docker（{path}）失败：{e}")))
@@ -336,7 +337,7 @@ async fn container_action(
     }
 }
 
-async fn pull(d: &Docker, reference: &str, call: &Call<'_>) -> OpResult<Value> {
+pub(super) async fn pull(d: &Docker, reference: &str, call: &Call<'_>) -> OpResult<Value> {
     let (image, tag) = split_ref(reference);
     call.log.line(format!("拉取镜像 {image}:{tag}"));
     if call.dry_run {

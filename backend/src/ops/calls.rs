@@ -22,6 +22,10 @@ pub const WRITE_CALLS: &[(&str, bool)] = &[
     ("nginx.site_save", true),
     ("nginx.site_delete", true),
     ("nginx.cert_issue", true),
+    ("nginx.service", true),
+    ("nginx.install", true),
+    ("nginx.upgrade", true),
+    ("nginx.rollback", true),
     // private keys must not pass through an agent
     ("nginx.cert_upload", false),
     ("firewall.add", true),
@@ -110,6 +114,13 @@ pub fn summary(call: &str, args: &Value) -> String {
         "nginx.site_delete" => format!("删除站点 {}", s(args, "name")),
         "nginx.cert_upload" => format!("为站点 {} 上传证书", s(args, "name")),
         "nginx.cert_issue" => format!("为站点 {} 申请证书", s(args, "name")),
+        "nginx.service" => format!("{} nginx", action(s(args, "action"))),
+        "nginx.install" => format!("用 Docker 安装 nginx {}", s(args, "version")),
+        "nginx.upgrade" => match args["version"].as_str() {
+            Some(v) => format!("将 nginx 切换到 {v}"),
+            None => "升级系统包 nginx".into(),
+        },
+        "nginx.rollback" => "回退 nginx 到上一个版本".into(),
         "firewall.add" => format!(
             "添加防火墙规则 {} {}/{}{}",
             s(args, "action"),

@@ -20,6 +20,9 @@ pub mod firewall;
 pub mod fsutil;
 pub mod nginx;
 pub mod nginx_cert;
+pub mod nginx_docker;
+pub mod nginx_pkg;
+pub mod nginx_runtime;
 pub mod nginx_site;
 pub mod pending;
 pub mod ssh;
@@ -64,8 +67,8 @@ pub struct Ctx {
     pub cfg: Arc<HelperConfig>,
     pub pending: Arc<pending::Pending>,
     locks: [Arc<Mutex<()>>; 4],
-    /// nginx version, detected on first use.
-    pub nginx_version: tokio::sync::OnceCell<Option<(u32, u32, u32)>>,
+    /// nginx version, detected on first use and forgotten after an install or upgrade.
+    pub nginx_version: std::sync::Mutex<Option<Option<(u32, u32, u32)>>>,
     pub acme: Arc<dyn acme::Issuer>,
     /// Sites with a certificate order in flight (orders run without the nginx lock).
     pub issuing: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -112,7 +115,7 @@ impl Ctx {
             cfg: Arc::new(cfg),
             pending,
             locks: std::array::from_fn(|_| Arc::new(Mutex::new(()))),
-            nginx_version: tokio::sync::OnceCell::new(),
+            nginx_version: std::sync::Mutex::new(None),
             acme,
             issuing: Default::default(),
         }))
@@ -163,6 +166,7 @@ async fn hello(ctx: &Ctx) -> Value {
                 "allow": c.nginx.allow,
                 "site_roots": c.nginx.site_roots,
                 "cert_paths": c.nginx.cert_paths,
+                "runtime": c.nginx.runtime.as_str(),
                 "acme": {
                     "enabled": c.nginx.acme.enabled,
                     "staging": c.nginx.acme.directory.is_none() && c.nginx.acme.staging,
@@ -419,6 +423,9 @@ pub fn is_query(call: &str) -> bool {
             | "nginx.files"
             | "nginx.file"
             | "nginx.site_get"
+            | "nginx.status"
+            | "nginx.versions"
+            | "nginx.log_tail"
             | "firewall.status"
             | "ssh.config"
             | "ssh.keys"

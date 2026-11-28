@@ -107,6 +107,56 @@ pub enum NginxOp {
     Manage,
     /// Upload certificates and issue / renew them through ACME for managed sites.
     Cert,
+    /// Start, stop and restart nginx (systemd unit, binary or the Docker container).
+    Service,
+    /// Install nginx as a Docker container. ROOT-EQUIVALENT: creates a container with host
+    /// networking and bind mounts of the nginx config, logs, site roots and certificates.
+    Install,
+    /// Upgrade nginx (apt package or container image) and roll a container upgrade back.
+    /// ROOT-EQUIVALENT: runs the package manager / replaces the container.
+    Upgrade,
+}
+
+/// Where nginx runs.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NginxRuntime {
+    /// The helper's Docker container when it exists, else the host binary.
+    #[default]
+    Auto,
+    Host,
+    Docker,
+}
+
+impl NginxRuntime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Host => "host",
+            Self::Docker => "docker",
+        }
+    }
+}
+
+/// nginx in a Docker container created by the helper (`nginx.install`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NginxDocker {
+    pub container: String,
+    /// Image repository without tag; versions are its tags.
+    pub image: String,
+    /// Additional bind mounts, `host:container[:ro]`, both absolute.
+    pub binds: Vec<String>,
+}
+
+impl Default for NginxDocker {
+    fn default() -> Self {
+        Self {
+            container: "tsm-nginx".into(),
+            image: "nginx".into(),
+            binds: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -172,6 +222,10 @@ pub struct NginxDomain {
     /// Where existing certificates may be referenced from (`path` SSL mode).
     pub cert_paths: Vec<String>,
     pub acme: AcmeConfig,
+    pub runtime: NginxRuntime,
+    /// error.log / access.log for the log viewer (mounted into the container in Docker mode).
+    pub log_dir: PathBuf,
+    pub docker: NginxDocker,
 }
 
 impl Default for NginxDomain {
@@ -186,6 +240,9 @@ impl Default for NginxDomain {
             site_roots: vec!["/var/www".into()],
             cert_paths: vec!["/etc/letsencrypt".into(), "/etc/ssl".into()],
             acme: AcmeConfig::default(),
+            runtime: NginxRuntime::Auto,
+            log_dir: "/var/log/nginx".into(),
+            docker: NginxDocker::default(),
         }
     }
 }
@@ -302,6 +359,25 @@ impl HelperConfig {
             crate::ops::validate::simple_name("zone", z)
                 .map_err(|e| anyhow::anyhow!("firewall.zone: {e}"))?;
         }
+        let nd = &self.nginx.docker;
+        crate::ops::validate::container_ref(&nd.container)
+            .map_err(|e| anyhow::anyhow!("nginx.docker.container: {e}"))?;
+        if nd.image.contains(['@', ' '])
+            || nd.image.rsplit('/').next().is_some_and(|l| l.contains(':'))
+        {
+            bail!(
+                "nginx.docker.image must be a repository without tag or digest: {:?}",
+                nd.image
+            );
+        }
+        crate::ops::validate::image_ref(&nd.image)
+            .map_err(|e| anyhow::anyhow!("nginx.docker.image: {e}"))?;
+        for b in &nd.binds {
+            parse_bind(b).map_err(|e| anyhow::anyhow!("nginx.docker.binds: {e}"))?;
+        }
+        if !self.nginx.log_dir.is_absolute() {
+            bail!("nginx.log_dir must be absolute");
+        }
         if let Some(u) = &self.nginx.probe_url {
             let p = url::Url::parse(u).context("nginx.probe_url")?;
             if !matches!(p.scheme(), "http" | "https") {
@@ -310,6 +386,23 @@ impl HelperConfig {
         }
         Ok(())
     }
+}
+
+/// `host:container[:ro|rw]` with absolute paths.
+pub fn parse_bind(b: &str) -> Result<(&str, &str, bool)> {
+    let parts: Vec<&str> = b.split(':').collect();
+    let (h, c, ro) = match parts.as_slice() {
+        [h, c] => (*h, *c, false),
+        [h, c, "ro"] => (*h, *c, true),
+        [h, c, "rw"] => (*h, *c, false),
+        _ => bail!("{b:?} is not host:container[:ro]"),
+    };
+    for p in [h, c] {
+        if !p.starts_with('/') || p.split('/').any(|s| s == "..") {
+            bail!("{b:?}: paths must be absolute");
+        }
+    }
+    Ok((h, c, ro))
 }
 
 #[cfg(test)]

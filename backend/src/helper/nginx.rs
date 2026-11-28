@@ -1,4 +1,5 @@
-//! nginx domain: test, reload, enable/disable sites, edit config files. Every change is
+//! nginx domain: test, reload, enable/disable sites, edit config files, service control,
+//! Docker install and version upgrades (see `nginx_runtime`, `nginx_docker`, `nginx_pkg`). Every change is
 //! followed by `nginx -t`; a failed test, reload or probe restores the previous files.
 
 use std::path::{Path, PathBuf};
@@ -111,6 +112,35 @@ pub async fn handle(ctx: &Ctx, op: &str, call: Call<'_>) -> OpResult<Value> {
             let _g = ctx.lock(Domain::Nginx).await?;
             site(ctx, &root, &name, a.enabled, &call).await
         }
+        "status" => Ok(super::nginx_runtime::status(ctx).await),
+        "versions" => super::nginx_docker::versions(ctx).await,
+        "log_tail" => super::nginx_runtime::log_tail(ctx, call.args()?),
+        "service" => {
+            let a = call.args()?;
+            let _g = ctx.lock(Domain::Nginx).await?;
+            super::nginx_runtime::service(ctx, a, &call).await
+        }
+        "install" => {
+            let a = call.args()?;
+            let _g = ctx.lock(Domain::Nginx).await?;
+            super::nginx_docker::install(ctx, a, &call).await
+        }
+        "upgrade" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                #[serde(default)]
+                version: Option<String>,
+            }
+            let a: A = call.args()?;
+            let _g = ctx.lock(Domain::Nginx).await?;
+            super::nginx_pkg::upgrade_any(ctx, a.version, &call).await
+        }
+        "rollback" => {
+            let _: serde::de::IgnoredAny = call.args()?;
+            let _g = ctx.lock(Domain::Nginx).await?;
+            super::nginx_docker::rollback(ctx, &call).await
+        }
         "write" => {
             let a: WriteArgs = call.args()?;
             allow(ctx, NginxOp::Edit)?;
@@ -122,30 +152,15 @@ pub async fn handle(ctx: &Ctx, op: &str, call: Call<'_>) -> OpResult<Value> {
 }
 
 async fn test(ctx: &Ctx, log: &Log) -> OpResult<exec::Output> {
-    exec::run_logged(
-        log,
-        &exec::argv(&[&ctx.cfg.nginx.binary, "-t"]),
-        Duration::from_secs(30),
-    )
-    .await
-    .map_err(OpError::from)
+    super::nginx_runtime::test(ctx, log).await
 }
 
 async fn reload(ctx: &Ctx, log: &Log) -> OpResult<()> {
-    let argv = if exec::unit_active("nginx.service").await {
-        exec::argv(&["systemctl", "reload", "nginx.service"])
-    } else {
-        exec::argv(&[&ctx.cfg.nginx.binary, "-s", "reload"])
-    };
-    let out = exec::run_logged(log, &argv, Duration::from_secs(60)).await?;
-    if !out.ok() {
-        return Err(OpError::failed(format!("重新加载失败：{}", out.message())));
-    }
-    Ok(())
+    super::nginx_runtime::reload(ctx, log).await
 }
 
 /// GETs the configured probe URL after a reload; 5xx or no answer counts as broken.
-async fn probe(ctx: &Ctx, log: &Log) -> OpResult<()> {
+pub(super) async fn probe(ctx: &Ctx, log: &Log) -> OpResult<()> {
     let Some(url) = &ctx.cfg.nginx.probe_url else {
         return Ok(());
     };
@@ -385,6 +400,7 @@ pub(crate) mod tests {
         cfg.nginx.root = root.to_path_buf();
         cfg.nginx.allow = vec![NginxOp::Site, NginxOp::Reload, NginxOp::Test];
         cfg.nginx.binary = fake_nginx(dir, root);
+        cfg.nginx.runtime = crate::helper::config::NginxRuntime::Host;
         f(&mut cfg.nginx);
         Ctx::new(cfg).unwrap()
     }

@@ -70,7 +70,10 @@ name to `[server] mcp_allowed_hosts` (the MCP transport rejects unknown `Host` h
    with `nginx_get_site`, change the `spec`, and save with `nginx_save_site` (pass its `sha256` as
    `base_sha256`); `nginx_issue_certificate` issues or renews an ACME certificate for them.
 5. **Rollback.** nginx changes are tested (`nginx -t`), reloaded and probed; any failure restores the
-   previous files byte for byte.
+   previous files byte for byte. `nginx_status` shows how nginx runs (package or the panel's Docker
+   container) and its version; `nginx_upgrade` on a container tests the new image first and switches
+   back automatically on failure (`nginx_rollback` returns to the previous image later), while an apt
+   upgrade cannot be undone automatically.
 6. **Confirm-or-revert.** Firewall and sshd changes, once approved, apply provisionally and return
    `result.pending`. A person must also confirm them in the dashboard before the deadline, otherwise
    they revert. Agents can call `revert_change` but cannot confirm. `list_pending_changes` shows what

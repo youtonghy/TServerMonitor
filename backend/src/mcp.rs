@@ -337,6 +337,22 @@ impl McpServer {
     }
 
     #[tool(
+        description = "nginx itself: runtime (host package/binary, Docker container created by the panel, or none), version, compiled modules, running state, workers, systemd unit or container, apt installed/candidate versions, previous image for rollback, and why a Docker install is impossible.",
+        annotations(read_only_hint = true)
+    )]
+    async fn nginx_status(&self) -> Result<CallToolResult, ErrorData> {
+        self.read("nginx.status", serde_json::json!({})).await
+    }
+
+    #[tool(
+        description = "nginx versions available as Docker image tags (newest first; channel stable = even minor, mainline = odd), for nginx_install and nginx_upgrade.",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    async fn nginx_versions(&self) -> Result<CallToolResult, ErrorData> {
+        self.read("nginx.versions", serde_json::json!({})).await
+    }
+
+    #[tool(
         description = "Read one nginx config file by relative path, e.g. sites-available/shop. Secret values are replaced with <redacted>; sha256 is of the real file, pass it as base_sha256 when writing.",
         annotations(read_only_hint = true)
     )]
@@ -924,6 +940,28 @@ pub struct SiteDeleteArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct NginxServiceArgs {
+    /// start | stop | restart
+    pub action: String,
+    #[serde(default = "yes")]
+    pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct NginxVersionArgs {
+    /// image tag such as 1.27.3 (see nginx_versions)
+    pub version: Option<String>,
+    #[serde(default = "yes")]
+    pub dry_run: bool,
+    /// required when dry_run=false: why the change is needed, the evidence and the expected
+    /// effect; shown to the person who approves it
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CertIssueArgs {
     pub name: String,
     /// issue even if the current certificate is not due for renewal
@@ -1462,6 +1500,103 @@ impl McpServer {
             &ext,
             "nginx.cert_issue",
             serde_json::json!({ "name": a.name, "force": a.force }),
+            a.dry_run,
+            a.reason,
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Start, stop or restart nginx (systemd unit, binary or the panel's Docker container). Start/restart require nginx -t to pass and are probed afterwards. Dry run unless dry_run=false.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn nginx_service(
+        &self,
+        ext: rmcp::model::Extensions,
+        Parameters(a): Parameters<NginxServiceArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.write(
+            &ext,
+            "nginx.service",
+            serde_json::json!({ "action": a.action }),
+            a.dry_run,
+            a.reason,
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Install nginx as a Docker container (official image, host networking) when the host has no nginx. Seeds /etc/nginx from the image if empty, tests the config with the new image first. Long-running (image pull). Dry run unless dry_run=false.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn nginx_install(
+        &self,
+        ext: rmcp::model::Extensions,
+        Parameters(a): Parameters<NginxVersionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(v) = a.version else {
+            return Err(ErrorData::invalid_params("version is required", None));
+        };
+        self.write(
+            &ext,
+            "nginx.install",
+            serde_json::json!({ "version": v }),
+            a.dry_run,
+            a.reason,
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Upgrade nginx. Docker runtime: switch the container to image tag `version` (tested with nginx -t first, probed after, reverted automatically on failure). Host package: omit version; upgrades to the apt candidate, which cannot be rolled back automatically. Dry run unless dry_run=false.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn nginx_upgrade(
+        &self,
+        ext: rmcp::model::Extensions,
+        Parameters(a): Parameters<NginxVersionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let args = match a.version {
+            Some(v) => serde_json::json!({ "version": v }),
+            None => serde_json::json!({}),
+        };
+        self.write(&ext, "nginx.upgrade", args, a.dry_run, a.reason)
+            .await
+    }
+
+    #[tool(
+        description = "Docker runtime only: switch nginx back to the image it ran before the last upgrade (previous_image in nginx_status). Dry run unless dry_run=false.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn nginx_rollback(
+        &self,
+        ext: rmcp::model::Extensions,
+        Parameters(a): Parameters<DryArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.write(
+            &ext,
+            "nginx.rollback",
+            serde_json::json!({}),
             a.dry_run,
             a.reason,
         )

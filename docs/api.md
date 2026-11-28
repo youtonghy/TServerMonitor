@@ -216,7 +216,7 @@ interface AgentStep {
 | POST (admin) | `/api/v1/packages/jobs` body `{ op: "refresh" \| "upgrade_security" \| "upgrade_all" \| "upgrade_packages"; packages?: string[] }` | `202 { id }`; `400` when the update helper is not installed, a job is running, or a package name is invalid. Output streams as `package_job` events |
 | GET | `/api/v1/access/history?range=1h\|6h\|24h\|7d\|30d` | `AccessStats` from the persisted per-minute rollups (top lists and latency only up to 24h) |
 | GET | `/api/v1/ops/capabilities` | `OpsCapabilities` (helper reachable, enabled domains and allowed operations, dry-run, why writes are off) |
-| GET | `/api/v1/ops/read/{call}?path=` | `{ source: "helper" \| "local"; data }` for `docker.containers`, `docker.images`, `docker.volumes`, `docker.networks`, `nginx.sites` (each site includes extracted `target`), `nginx.files`, `nginx.file` (`path`), `nginx.site_get` (`name`, helper only), `firewall.status`, `ssh.config`, `ssh.keys`. Falls back to what the daemon can read itself; `503` when only the helper can answer |
+| GET | `/api/v1/ops/read/{call}?path=` | `{ source: "helper" \| "local"; data }` for `docker.containers`, `docker.images`, `docker.volumes`, `docker.networks`, `nginx.sites` (each site includes extracted `target`), `nginx.files`, `nginx.file` (`path`), `nginx.site_get` (`name`, helper only), `nginx.status`, `nginx.versions`, `nginx.log_tail` (`file=error|access`, `lines` ≤ 1000) (these three helper only), `firewall.status`, `ssh.config`, `ssh.keys`. Falls back to what the daemon can read itself; `503` when only the helper can answer |
 | GET | `/api/v1/nginx/sites/{name}/conversations` | `{ conversations: (Conversation & { queued: boolean })[]; requests: ChangeRequest[] }`: conversations started inside that nginx site panel (oldest first) and the change requests they filed |
 | POST (admin) | `/api/v1/nginx/draft` body `{ mode: "site" \| "file", instruction, site_name?, spec?, path?, content? }` | Uses read-only tools + structured output to draft a `SiteSpec` (`mode = "site"`) or full config text (`mode = "file"`), returning `{ mode, spec \| content, summary, warning, conversation_id }` |
 | GET | `/api/v1/ssh/sessions` | `{ user, tty, since, from }[]` from `who` |
@@ -337,6 +337,10 @@ interface ResolvedModel { provider: string; source: "db" | "config"; api_format:
 | `nginx.site_delete` | `{ name, purge_certs? }` | managed sites only |
 | `nginx.cert_upload` | `{ name, cert_pem, key_pem }` | needs `cert`; dashboard only (not over MCP). The key is never stored in the job |
 | `nginx.cert_issue` | `{ name, force? }` | needs `cert` and `[nginx.acme] enabled`; ACME HTTP-01 after a local self-check, may run for minutes (poll the job). Skipped while the certificate is valid for more than `renew_days` and covers every domain, unless `force` |
+| `nginx.service` | `{ action: start\|stop\|restart }` | needs `service`. Start/restart run `nginx -t` first and probe afterwards; systemd unit, plain binary or the Docker container |
+| `nginx.install` | `{ version }` | needs `install` (root-equivalent). Only when the host has no nginx: pulls `nginx.docker.image:version`, seeds an empty `/etc/nginx` from the image (sites-available/sites-enabled layout), tests the config with the new image, creates the container (host network, `unless-stopped`) and probes |
+| `nginx.upgrade` | `{ version? }` | needs `upgrade`. Docker: switch to image tag `version` (tested first; the old container is kept until the new one passes the probe, then restored on failure). Host: omit `version`; `apt-get install --only-upgrade nginx` to the apt candidate, no automatic rollback |
+| `nginx.rollback` | `{}` | needs `upgrade`; Docker only, back to `previous_image` from `nginx.status` |
 | `firewall.add` | `{ action: allow\|deny\|reject\|limit, port, proto?: tcp\|udp\|any, from? }` | result `{ pending }` |
 | `firewall.delete` | `{ spec }` | `spec` exactly as listed by `firewall.status`; result `{ pending }` |
 | `firewall.toggle` | `{ enabled }` | ufw only; result `{ pending }` |
@@ -387,7 +391,7 @@ A `ping` comment is sent every 15 s.
 `search_log_clusters`, `list_containers`, `get_container_logs`, `list_log_sources`, `get_log_rates`, `list_ports`,
 `get_db_metrics`, `list_package_updates`), `get_access_history { range }`, the server inventory
 (`get_ops_capabilities`, `docker_inventory`, `docker_list_images`, `docker_list_volumes`, `docker_list_networks`,
-`nginx_list_sites`, `nginx_list_files`, `nginx_get_file { path }` (secrets replaced with `<redacted>`), `nginx_get_site { name }`,
+`nginx_list_sites`, `nginx_list_files`, `nginx_status`, `nginx_versions`, `nginx_get_file { path }` (secrets replaced with `<redacted>`), `nginx_get_site { name }`,
 `firewall_status`, `ssh_get_config`, `ssh_list_keys`, `ssh_list_sessions`, `list_ops_jobs`, `get_ops_job`,
 `get_ops_audit`, `list_pending_changes`), the panel's own state (`list_conversations`, `get_conversation { id }`,
 `list_tasks`, `list_prompts`, `list_notify_channels` (no secrets), `list_package_jobs`, `get_package_job`),
@@ -403,7 +407,7 @@ dry-run and wait for a person in the dashboard (`status: "pending"`); `auto` one
 changes are additionally provisional (`result.pending`) and revert unless a person confirms them;
 `revert_change { id }` is available, confirming is not. `nginx_write_file` and `nginx_save_site` refuse content that
 still contains redaction placeholders. Managed sites are changed with `nginx_save_site`, `nginx_delete_site` and
-`nginx_issue_certificate`; certificate uploads (`nginx.cert_upload`) are dashboard-only. See [mcp.md](mcp.md) for client configuration.
+`nginx_issue_certificate`; nginx itself with `nginx_service`, `nginx_install`, `nginx_upgrade` and `nginx_rollback`; certificate uploads (`nginx.cert_upload`) are dashboard-only. See [mcp.md](mcp.md) for client configuration.
 
 The MCP endpoints accept loopback `Host` headers plus `server.mcp_allowed_hosts`.
 

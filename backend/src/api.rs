@@ -2799,6 +2799,7 @@ mod tests {
         hcfg.nginx.enabled = true;
         hcfg.nginx.root = root.clone();
         hcfg.nginx.binary = bin.to_string_lossy().into_owned();
+        hcfg.nginx.runtime = crate::helper::config::NginxRuntime::Host;
         hcfg.nginx.allow = vec![
             crate::helper::config::NginxOp::Site,
             crate::helper::config::NginxOp::Test,

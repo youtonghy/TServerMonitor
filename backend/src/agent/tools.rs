@@ -198,9 +198,9 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "get_ops_inventory",
-            "description": "服务器管理面的只读信息（通过运维助手或本机只读访问获得，敏感值已打码）。what：docker_containers（容器与 compose 项目）、docker_images、nginx_sites（站点、域名、监听端口）、firewall（防火墙后端、规则、SSH 端口）、ssh_config（sshd 生效配置）、ssh_keys（各用户公钥指纹）、ops_jobs（最近的管理操作记录）。",
+            "description": "服务器管理面的只读信息（通过运维助手或本机只读访问获得，敏感值已打码）。what：docker_containers（容器与 compose 项目）、docker_images、nginx_sites（站点、域名、监听端口）、nginx_status（nginx 运行方式、版本、模块、运行状态、可升级版本）、nginx_versions（Docker 方式可选的 nginx 版本）、firewall（防火墙后端、规则、SSH 端口）、ssh_config（sshd 生效配置）、ssh_keys（各用户公钥指纹）、ops_jobs（最近的管理操作记录）。",
             "input_schema": { "type": "object", "properties": {
-                "what": { "type": "string", "enum": ["docker_containers", "docker_images", "nginx_sites", "firewall", "ssh_config", "ssh_keys", "ops_jobs"] }
+                "what": { "type": "string", "enum": ["docker_containers", "docker_images", "nginx_sites", "nginx_status", "nginx_versions", "firewall", "ssh_config", "ssh_keys", "ops_jobs"] }
             }, "required": ["what"], "additionalProperties": false }
         }),
         json!({
@@ -546,6 +546,8 @@ pub async fn execute(ctx: &ToolCtx<'_>, name: &str, input: &Value) -> Result<Val
                 "docker_containers" => "docker.containers",
                 "docker_images" => "docker.images",
                 "nginx_sites" => "nginx.sites",
+                "nginx_status" => "nginx.status",
+                "nginx_versions" => "nginx.versions",
                 "firewall" => "firewall.status",
                 "ssh_config" => "ssh.config",
                 "ssh_keys" => "ssh.keys",

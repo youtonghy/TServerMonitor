@@ -168,6 +168,9 @@ pub const READ_CALLS: &[&str] = &[
     "nginx.files",
     "nginx.file",
     "nginx.site_get",
+    "nginx.status",
+    "nginx.versions",
+    "nginx.log_tail",
     "firewall.status",
     "ssh.config",
     "ssh.keys",
@@ -247,6 +250,8 @@ async fn local_read(state: &Shared, call: &str, args: &Value) -> OpResult<Value>
             }))
         }
         "nginx.site_get" => Err(need_helper("查看站点设置")),
+        "nginx.status" | "nginx.versions" => Err(need_helper("管理 nginx 服务与版本")),
+        "nginx.log_tail" => Err(need_helper("查看 nginx 日志")),
         "ssh.keys" => Err(need_helper("查看各用户的 authorized_keys ")),
         "firewall.status" => Err(need_helper("查看防火墙规则")),
         c if c.starts_with("docker.") => {

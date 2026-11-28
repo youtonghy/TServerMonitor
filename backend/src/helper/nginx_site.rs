@@ -6,7 +6,6 @@
 //! link, then runs the usual test / reload / probe; any failure restores all of them.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -14,7 +13,7 @@ use serde_json::{Value, json};
 use super::config::NginxOp;
 use super::fsutil;
 use super::nginx::{allow, apply_or_rollback};
-use super::{Call, Ctx, exec};
+use super::{Call, Ctx};
 use crate::ops::nginx as inv;
 use crate::ops::nginx_site::{self as spec_mod, CertInfo, RenderEnv, SiteSpec, SslMode};
 use crate::ops::proto::{ErrorCode, OpError, OpResult};
@@ -146,27 +145,8 @@ pub fn cert_files(root: &Path, spec: &SiteSpec) -> Option<(PathBuf, PathBuf)> {
     (c.is_file() && k.is_file()).then_some((c, k))
 }
 
-/// nginx version as (major, minor, patch), detected once.
 async fn nginx_version(ctx: &Ctx) -> Option<(u32, u32, u32)> {
-    *ctx.nginx_version
-        .get_or_init(|| async {
-            let out = exec::run(
-                &exec::argv(&[&ctx.cfg.nginx.binary, "-v"]),
-                Duration::from_secs(10),
-            )
-            .await
-            .ok()?;
-            parse_version(&format!("{}{}", out.stderr, out.stdout))
-        })
-        .await
-}
-
-fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
-    let v = s.split("nginx/").nth(1)?;
-    let mut it = v
-        .split(|c: char| !c.is_ascii_digit())
-        .map(|x| x.parse::<u32>());
-    Some((it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?))
+    super::nginx_runtime::version(ctx).await
 }
 
 pub async fn render_env(ctx: &Ctx, root: &Path, spec: &SiteSpec) -> RenderEnv {
@@ -542,6 +522,7 @@ mod tests {
 
     #[test]
     fn version_parsing() {
+        use crate::helper::nginx_runtime::parse_version;
         assert_eq!(
             parse_version("nginx version: nginx/1.24.0\n"),
             Some((1, 24, 0))

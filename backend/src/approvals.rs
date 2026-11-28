@@ -158,6 +158,22 @@ pub const CATALOG: &[ActionDef] = &[
         "为站点申请/续期证书（ACME）",
         r#"{"name": "站点名", "force": false}"#,
     ),
+    host(
+        "nginx.service",
+        "启动/停止/重启 nginx",
+        r#"{"action": "start|stop|restart"}"#,
+    ),
+    host(
+        "nginx.install",
+        "用 Docker 安装 nginx",
+        r#"{"version": "镜像版本标签，如 1.27.3（get_ops_inventory nginx_versions）"}"#,
+    ),
+    host(
+        "nginx.upgrade",
+        "升级 nginx",
+        r#"{"version": "Docker 方式：目标版本；系统包方式省略（升级到 apt 候选版本）"}"#,
+    ),
+    host("nginx.rollback", "回退 nginx 版本（Docker 方式）", "{}"),
     // private keys never pass through an agent
     ActionDef {
         agent: false,

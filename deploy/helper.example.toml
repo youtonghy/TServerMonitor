@@ -38,13 +38,16 @@ protected = []
 
 [nginx]
 enabled = false
-# test | reload | site | edit | manage | cert
+# test | reload | site | edit | manage | cert | service | install | upgrade
 # `edit` is ROOT-EQUIVALENT: nginx loads its config as root. Obvious escapes (load_module,
 # user, perl/js/lua, log paths outside /var/log, ...) are refused, but treat it as root access.
 # `manage` creates, changes and deletes sites generated from the dashboard form (reverse
 # proxy or static files) from a fixed template; custom directives in a managed site also
 # need `edit`. `cert` uploads certificates and issues them through ACME (see [nginx.acme]).
-# A typical one-click setup: allow = ["test", "reload", "site", "manage", "cert"]
+# `service` starts / stops / restarts nginx. `install` (ROOT-EQUIVALENT) installs nginx as a Docker
+# container when the host has none (see [nginx.docker]); `upgrade` (ROOT-EQUIVALENT) upgrades the
+# apt package or switches the container image, and rolls a container back.
+# A typical one-click setup: allow = ["test", "reload", "site", "manage", "cert", "service"]
 allow = []
 root = "/etc/nginx"
 edit_dirs = ["conf.d", "sites-available", "snippets"]
@@ -56,6 +59,11 @@ binary = "nginx"
 site_roots = ["/var/www"]
 # Existing certificates (e.g. from certbot) may be referenced from these directories.
 cert_paths = ["/etc/letsencrypt", "/etc/ssl"]
+# Where nginx runs: auto (the [nginx.docker] container if it exists, else the host binary),
+# host or docker. In Docker mode `nginx -t` and reloads run inside the container.
+runtime = "auto"
+# error.log / access.log for the log viewer; mounted at /var/log/nginx in the container.
+log_dir = "/var/log/nginx"
 
 [nginx.acme]
 # Issue and renew certificates automatically (ACME HTTP-01, Let's Encrypt by default). The
@@ -70,6 +78,15 @@ renew_days = 30
 # Another ACME directory (private CA) and its root certificate:
 # directory = "https://ca.internal/acme/acme/directory"
 # ca_file = "/etc/tsmonitor/acme-root.pem"
+
+[nginx.docker]
+# Container created by `install` (Docker socket from [docker] socket, even if that domain is off).
+# It uses host networking and mounts `root` read-only at /etc/nginx (root must be /etc/nginx),
+# log_dir, and the site_roots / cert_paths that exist (read-only). Versions are image tags.
+container = "tsm-nginx"
+image = "nginx"
+# Extra bind mounts, "host:container[:ro]":
+binds = []
 
 [firewall]
 enabled = false
