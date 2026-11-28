@@ -58,3 +58,14 @@ export function covers(pattern: string, host: string): boolean {
   const dot = host.indexOf(".");
   return dot > 0 && host.slice(dot + 1) === pattern.slice(2);
 }
+
+export function formatSiteDomains(names: string[]): string {
+  if (names.length === 0) return "—";
+  if (names.length === 1 && names[0] === "_") return "默认站点 (_)";
+  return names.join(" ");
+}
+
+export function formatListen(listen: string[]): string {
+  if (listen.length === 0) return "—";
+  return [...new Set(listen)].join(" · ");
+}

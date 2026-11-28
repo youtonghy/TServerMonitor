@@ -1,8 +1,8 @@
 // Development mock (VITE_MOCK=1). Generates data that conforms to docs/api.md and simulates the SSE stream.
 // Never imported by production builds.
-import { ApiError, type Api } from "./client";
+import { ApiError, type Api, withSudo } from "./client";
 import { mockAuth, opsMock } from "./mock-ops";
-import { withSudo } from "./client";
+import { defaultSpec, nameFromDomain } from "@/lib/nginx-site";
 import type { AccountUser, ApiTokenRecord, AuthState, SessionView } from "./types";
 import type {
   AgentRun, AgentRunDetail, AgentStep, AiStatus, Alert, ContainerInfo, ContainerLogLine, DailyErrorCount, DbStatus,
@@ -628,6 +628,7 @@ const POLICY_DEFAULTS: Omit<ApprovalPolicy, "mode">[] = [
   { action: "docker.container", label: "容器启停/删除", kind: "host", default: "approve", agent: true },
   { action: "nginx.test", label: "检查 nginx 配置（nginx -t）", kind: "host", default: "auto", agent: true },
   { action: "nginx.write", label: "修改 nginx 配置文件", kind: "host", default: "approve", agent: true },
+  { action: "nginx.site_save", label: "创建/修改面板管理的 nginx 站点", kind: "host", default: "approve", agent: true },
   { action: "nginx.reload", label: "重新加载 nginx", kind: "host", default: "approve", agent: true },
   { action: "firewall.add", label: "添加防火墙规则", kind: "host", default: "approve", agent: true },
   { action: "ssh.set", label: "修改 sshd 设置", kind: "host", default: "approve", agent: true },
@@ -665,14 +666,17 @@ const changeRequests: ChangeRequest[] = [
   },
 ];
 
-function fileRequest(conversationId: string, runId: string): ChangeRequest {
+function fileRequest(conversationId: string, runId: string, opts?: { action?: string; path?: string; site?: string; reason?: string }): ChangeRequest {
   const id = Math.max(0, ...changeRequests.map(c => c.id)) + 1;
+  const action = opts?.action ?? "nginx.write";
+  const path = opts?.path ?? "sites-available/wordpress";
   const req: ChangeRequest = {
-    id, action: "nginx.write", label: "修改 nginx 配置文件", kind: "host", summary: "修改 nginx 配置 sites-available/wordpress",
-    args: { path: "sites-available/wordpress", content: { bytes: 1840, sha256: "9f2c…" }, base_sha256: "51ab…" },
-    reason: "10.10.10.10 两分钟内 9680 次请求打满 php-fpm 工作池；在站点加 limit_req 限流，并对 /.env、/.git 等扫描路径直接返回 444。",
+    id, action, label: action === "nginx.site_save" ? "创建/修改面板管理的 nginx 站点" : "修改 nginx 配置文件", kind: "host",
+    summary: action === "nginx.site_save" ? `修改站点 ${opts?.site ?? "app"}` : `修改 nginx 配置 ${path}`,
+    args: action === "nginx.site_save" ? { spec: { name: opts?.site ?? "app" } } : { path, content: { bytes: 1840, sha256: "9f2c…" }, base_sha256: "51ab…" },
+    reason: opts?.reason ?? "10.10.10.10 两分钟内 9680 次请求打满 php-fpm 工作池；在站点加 limit_req 限流，并对 /.env、/.git 等扫描路径直接返回 444。",
     source: "agent", actor: `agent:${conversationId}`, remote: null, conversation_id: conversationId, run_id: runId,
-    mode: policyOverrides.get("nginx.write") ?? "approve", status: "pending",
+    mode: policyOverrides.get(action) ?? "approve", status: "pending",
     preview: { job_id: 50 + id, status: "succeeded", error: null, result: { diff: NGINX_DIFF }, log: "nginx -t: syntax is ok" },
     result: null, error: null, job_id: null, created_at: Date.now(), expires_at: Date.now() + 30 * MIN,
     decided_at: null, decided_by: null, note: null, finished_at: null,
@@ -682,7 +686,7 @@ function fileRequest(conversationId: string, runId: string): ChangeRequest {
   return req;
 }
 
-const approvalsApi: Pick<Api, "approvals" | "approval" | "approve" | "reject" | "approvalPolicy" | "setApprovalPolicy" | "reportConversations"> = {
+const approvalsApi: Pick<Api, "approvals" | "approval" | "approve" | "reject" | "approvalPolicy" | "setApprovalPolicy" | "reportConversations" | "nginxSiteConversations"> = {
   approvals: (status = "open", limit = 100) => {
     const now = Date.now();
     for (const c of changeRequests) if (c.status === "pending" && c.expires_at <= now) Object.assign(c, { status: "expired", finished_at: now });
@@ -724,6 +728,11 @@ const approvalsApi: Pick<Api, "approvals" | "approval" | "approve" | "reject" | 
     const ids = new Set(list.map(c => c.id));
     return delay({ conversations: list.map(c => ({ ...c, queued: false })), requests: changeRequests.filter(c => c.conversation_id && ids.has(c.conversation_id)) });
   },
+  nginxSiteConversations: name => {
+    const list = conversationList("chat").filter(c => c.context && "nginx_site" in c.context && c.context.nginx_site === name);
+    const ids = new Set(list.map(c => c.id));
+    return delay({ conversations: list.map(c => ({ ...c, queued: false })), requests: changeRequests.filter(c => c.conversation_id && ids.has(c.conversation_id)) });
+  },
 };
 
 const ANSWER = "根据最近一小时的数据：CPU 平均 41%，内存 68%，没有持续超过阈值的指标。\n\n值得注意的是 php-error 日志的错误率是基线的 8 倍，主要模板是 `PDOException: SQLSTATE[HY000] [2002]`，说明应用连不上数据库。建议先检查 mysql 容器状态和连接数上限。";
@@ -742,25 +751,39 @@ function simulateChat(conversationId: string, text: string): string {
   const chat = chats.find(c => c.id === conversationId);
   if (chat && chat.title === "新对话") chat.title = text.slice(0, 30);
   step("user", { text });
-  setTimeout(() => step("tool_call", { tool: "get_host_metrics", input: { range: "1h" } }), 600);
-  setTimeout(() => step("tool_result", { tool: "get_host_metrics", output: { cpu_avg: 41.2, mem_avg: 68.4 } }), 900);
+  const siteCtx = chat?.context && "nginx_site" in chat.context ? chat.context : null;
+  if (siteCtx) {
+    setTimeout(() => step("tool_call", { tool: siteCtx.managed ? "get_nginx_site" : "get_nginx_file", input: siteCtx.managed ? { name: siteCtx.nginx_site } : { path: siteCtx.file ?? `sites-available/${siteCtx.nginx_site}` } }), 450);
+    setTimeout(() => step("tool_result", { tool: siteCtx.managed ? "get_nginx_site" : "get_nginx_file", output: { name: siteCtx.nginx_site, ok: true } }), 750);
+  } else {
+    setTimeout(() => step("tool_call", { tool: "get_host_metrics", input: { range: "1h" } }), 600);
+    setTimeout(() => step("tool_result", { tool: "get_host_metrics", output: { cpu_avg: 41.2, mem_avg: 68.4 } }), 900);
+  }
   const fixing = chat?.context && "intent" in chat.context && chat.context.intent === "fix" && !text.startsWith("【系统通知】");
-  if (fixing) {
-    const input = { action: "nginx.write", args: { path: "sites-available/wordpress" }, reason: "限流并屏蔽扫描路径" };
+  const siteWrite = siteCtx && !text.startsWith("【系统通知】") && /(优化|修改|撰写|生成|添加|限流|安全头|配置|修复|改|write|fix)/i.test(text);
+  if (fixing || siteWrite) {
+    const action = siteCtx?.managed ? "nginx.site_save" : "nginx.write";
+    const path = siteCtx?.file ?? "sites-available/wordpress";
+    const input = { action, args: siteCtx?.managed ? { spec: { name: siteCtx.nginx_site } } : { path }, reason: "优化站点配置并补充安全防护与缓存策略" };
     setTimeout(() => step("tool_call", { tool: "propose_change", input }), 1000);
     setTimeout(() => {
-      const req = fileRequest(conversationId, id);
+      const req = fileRequest(conversationId, id, { action, path, site: siteCtx?.nginx_site, reason: input.reason });
       step("tool_result", { tool: "propose_change", output: { request_id: req.id, status: req.status, summary: req.summary, needs_approval: true } });
     }, 1150);
   }
-  const parts = ANSWER.match(/.{1,6}/gsu) ?? [ANSWER];
+  const reply = siteCtx
+    ? siteWrite
+      ? `已检查站点 \`${siteCtx.nginx_site}\` 的当前配置与运行状态，并提交了配置变更申请（请核对下方 diff 预演后批准执行）：\n\n1. 屏蔽 \`/.env\`、\`/.git\` 等敏感路径扫描；\n2. 补充安全响应头与合理的请求限流/缓存策略。`
+      : `已读取站点 \`${siteCtx.nginx_site}\`（${siteCtx.managed ? "面板管理站点" : "手动维护配置"}）的配置和近期访问情况。\n\n当前要点：\n- 建议保持 \`TLSv1.2 TLSv1.3\`、开启 \`gzip\` 与 \`X-Content-Type-Options nosniff\`；\n- 如需我直接撰写或调整配置，可以直接在下方告诉我目标（例如“限流并屏蔽扫描路径”或“增加 /api/ 反代”）。`
+    : ANSWER;
+  const parts = reply.match(/.{1,6}/gsu) ?? [reply];
   parts.forEach((part, i) => setTimeout(() => {
     if (record.run.status !== "running") return;
     emit("agent_delta", { run_id: id, conversation_id: conversationId, text: part });
   }, 1200 + i * 60));
   setTimeout(() => {
     if (record.run.status !== "running") return;
-    step("message", { text: ANSWER });
+    step("message", { text: reply });
     Object.assign(record.run, { status: "succeeded", finished_at: Date.now() });
     emit("agent", { run_id: id, conversation_id: conversationId, status: "succeeded", step: null });
   }, 1400 + parts.length * 60);
@@ -1101,6 +1124,49 @@ export const mockApi: Api = {
     return delay({ ok: true as const });
   },
   generatePrompt: description => delay({ body: `任务：${description}。\n1. 查看相关日志源的错误率趋势与主要错误模板；\n2. 结合主机与容器指标判断是否存在资源瓶颈；\n3. 对发现的问题给出根因判断和具体处理建议（命令或配置项）。没有明显问题时简要说明即可。` }, 1500),
+  draftNginx: input => {
+    const convId = `c_draft_${Math.random().toString(16).slice(2, 8)}`;
+    const now = Date.now();
+    chats.unshift({ id: convId, title: `撰写 nginx 配置：${input.site_name ?? input.path ?? "草稿"}`, context: null, created_at: now });
+    if (input.mode === "site") {
+      const spec = structuredClone(input.spec ?? defaultSpec());
+      const domainMatch = input.instruction.match(/\b([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/i);
+      const portMatch = input.instruction.match(/(?:端口|port|:)\s*(\d{2,5})/i);
+      if (domainMatch && spec.domains.length === 0) spec.domains = [domainMatch[1].toLowerCase()];
+      if (input.site_name) spec.name = input.site_name;
+      else if (!spec.name && spec.domains[0]) spec.name = nameFromDomain(spec.domains[0]);
+      if (/(静态|spa|dist|html)/i.test(input.instruction)) {
+        spec.kind = "static";
+        spec.static = { ...spec.static, root: spec.static.root || `/var/www/${spec.name || "site"}`, spa: /spa|单页|react|vue/i.test(input.instruction) };
+      } else {
+        spec.kind = "proxy";
+        if (portMatch) spec.proxy.upstream = `http://127.0.0.1:${portMatch[1]}`;
+        else if (!spec.proxy.upstream) spec.proxy.upstream = "http://127.0.0.1:3000";
+        if (/websocket|ws/i.test(input.instruction)) spec.proxy.websocket = true;
+      }
+      if (/https|ssl|acme|证书/i.test(input.instruction)) spec.ssl.mode = "acme";
+      if (/(安全头|屏蔽|扫描|env|git)/i.test(input.instruction)) {
+        const snippet = "location ~ /\\.(env|git|svn) {\n    return 444;\n}\nadd_header X-Content-Type-Options nosniff always;";
+        spec.extra = spec.extra ? `${spec.extra.trim()}\n\n${snippet}` : snippet;
+      }
+      const summary = `已根据需求调整站点 ${spec.name || "配置"}（${spec.kind === "static" ? `静态目录 ${spec.static.root}` : `反代 ${spec.proxy.upstream}`}${spec.ssl.mode === "acme" ? "，启用自动 HTTPS" : ""}）。`;
+      runs.push({ run: { id: `run_${convId.slice(2)}`, trigger: "user", kind: "chat", status: "succeeded", started_at: now, finished_at: now + 900, model: "gpt-5.2", steps_count: 2, error: null, report_id: null, conversation_id: convId }, steps: [{ seq: 1, ts: now, kind: "user", tool: null, input: null, output: null, text: input.instruction }, { seq: 2, ts: now + 900, kind: "message", tool: null, input: null, output: null, text: summary }] });
+      return delay({ mode: "site" as const, spec, summary, warning: null, conversation_id: convId }, 600);
+    }
+    const base = (input.content ?? "server {\n    listen 80;\n    server_name example.com;\n}\n").trimEnd();
+    const additions: string[] = [];
+    if (!base.includes("X-Content-Type-Options") && /(安全|header|加固|优化)/i.test(input.instruction)) {
+      additions.push("    add_header X-Content-Type-Options \"nosniff\" always;", "    add_header X-Frame-Options \"SAMEORIGIN\" always;");
+    }
+    if (!base.includes(".env") && /(屏蔽|扫描|env|git|优化|加固)/i.test(input.instruction)) {
+      additions.push("    location ~ /\\.(env|git|svn) {\n        return 444;\n    }");
+    }
+    if (additions.length === 0) additions.push(`    # AI 撰写建议：${input.instruction.replace(/\n+/g, " ").slice(0, 60)}`);
+    const content = base.includes("}") ? `${base.slice(0, base.lastIndexOf("}"))}\n${additions.join("\n")}\n}\n` : `${base}\n${additions.join("\n")}\n`;
+    const summary = "已按要求撰写并更新配置文件内容，请在编辑器中核对后点击「预览并保存」。";
+    runs.push({ run: { id: `run_${convId.slice(2)}`, trigger: "user", kind: "chat", status: "succeeded", started_at: now, finished_at: now + 900, model: "gpt-5.2", steps_count: 2, error: null, report_id: null, conversation_id: convId }, steps: [{ seq: 1, ts: now, kind: "user", tool: null, input: null, output: null, text: input.instruction }, { seq: 2, ts: now + 900, kind: "message", tool: null, input: null, output: null, text: summary }] });
+    return delay({ mode: "file" as const, content, summary, warning: null, conversation_id: convId }, 600);
+  },
   ackAlert: id => alertAction(id, { acked_at: Date.now() }),
   silenceAlert: (id, minutes) => alertAction(id, { silenced_until: minutes > 0 ? Date.now() + minutes * MIN : null }),
   closeAlert: id => alertAction(id, { status: "resolved", acked_at: Date.now() }),

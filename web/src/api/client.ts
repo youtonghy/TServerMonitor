@@ -6,6 +6,7 @@ import type {
   AccessRange, AccessStats, AuditEntry, OpsCapabilities, OpsJob, OpsRead, PendingChange, SshSession,
   AccountUser, ApiTokenRecord, AuthState, AuthUser, SessionView,
   ApprovalMode, ApprovalPolicy, ApprovalsResponse, ChangeRequest, ChangeRequestStatus, ReportConversations,
+  NginxDraftRequest, NginxDraftResponse, SiteConversations,
 } from "./types";
 
 export const MOCK = import.meta.env.VITE_MOCK === "1";
@@ -185,6 +186,8 @@ export interface Api {
   opsRead<T>(call: string, params?: Record<string, string>): Promise<OpsRead<T>>;
   /** Starts a change (asks for the password when needed); waits up to ~20 s and returns the job. */
   opsRun(call: string, args?: Record<string, unknown>, dryRun?: boolean): Promise<OpsJob>;
+  nginxSiteConversations(name: string): Promise<SiteConversations>;
+  draftNginx(input: NginxDraftRequest): Promise<NginxDraftResponse>;
   sshSessions(): Promise<SshSession[]>;
   authState(): Promise<AuthState>;
   setup(code: string, username: string, password: string): Promise<{ ok: true }>;
@@ -279,6 +282,8 @@ const httpApi: Api = {
   setApprovalPolicy: (action, mode) => withSudo(() => request(`/approvals/policy/${encodeURIComponent(action)}`, json("PUT", { mode }))),
   opsRead: <T,>(call: string, params: Record<string, string> = {}) => request<OpsRead<T>>(`/ops/read/${encodeURIComponent(call)}${query(params)}`),
   opsRun,
+  nginxSiteConversations: name => request(`/nginx/sites/${encodeURIComponent(name)}/conversations`),
+  draftNginx: input => request("/nginx/draft", json("POST", input)),
   sshSessions: () => request("/ssh/sessions"),
   authState: () => request("/auth/state"),
   setup: (code, username, password) => request("/auth/setup", json("POST", { code, username, password })),

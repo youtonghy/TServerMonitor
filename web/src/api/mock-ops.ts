@@ -144,6 +144,18 @@ async function sha(text: string): Promise<string> {
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 const editable = (p: string) => /^(conf\.d|sites-available|snippets)\//.test(p);
+const stripComments = (text: string) => text.split("\n").map(l => l.split("#")[0]).join("\n");
+const siteTarget = (text: string): string | null => {
+  const clean = stripComments(text);
+  const proxy = /(?:^|[\s{;])proxy_pass\s+([^;{}]+);/m.exec(clean)?.[1]?.trim().replace(/\s+/g, " ");
+  if (proxy) return proxy;
+  const root = /(?:^|[\s{;])root\s+([^;{}]+);/m.exec(clean)?.[1]?.trim().replace(/\s+/g, " ");
+  const fcgi = /(?:^|[\s{;])fastcgi_pass\s+([^;{}]+);/m.exec(clean)?.[1]?.trim().replace(/\s+/g, " ");
+  if (root && fcgi) return `${root} (PHP: ${fcgi})`;
+  if (root) return root;
+  if (fcgi) return `fastcgi: ${fcgi}`;
+  return null;
+};
 const siteInfo = (text: string) => ({
   server_names: [...new Set([...text.matchAll(/server_name\s+([^;]+);/g)].flatMap(m => m[1].trim().split(/\s+/)))],
   listen: [...text.matchAll(/listen\s+([^;]+);/g)].map(m => m[1].trim()),
@@ -155,10 +167,13 @@ const sites = (): NginxSites => ({
     const info = siteInfo(files[p]);
     const m = managed[name];
     const marked = files[p].startsWith(`${MARKER} name=${name} `);
+    const isManaged = Boolean(m && marked);
+    const managedTarget = isManaged && m ? (m.spec.kind === "proxy" ? m.spec.proxy.upstream : m.spec.static.root) : null;
     return {
       name, file: p, enabled: enabled.has(name), layout: "sites_enabled" as const, ...info, ssl: info.listen.some(l => l.includes("ssl")),
-      managed: Boolean(m && marked), kind: m && marked ? m.spec.kind : undefined, drifted: Boolean(m && marked && files[p] !== m.rendered),
-      cert: m && marked ? m.cert : undefined,
+      managed: isManaged, kind: isManaged ? m.spec.kind : undefined, drifted: Boolean(isManaged && files[p] !== m.rendered),
+      cert: isManaged ? m.cert : undefined,
+      target: managedTarget || siteTarget(files[p]),
     };
   }),
 });

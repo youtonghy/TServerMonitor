@@ -131,6 +131,7 @@ export type ConversationContext =
   | { report_id: number; item?: ReportItemRef; intent?: ItemIntent }
   | { alert_id: number }
   | { run_id: string }
+  | { nginx_site: string; file?: string; managed?: boolean }
   | { text: string };
 export interface Conversation {
   id: string; title: string;
@@ -149,6 +150,7 @@ export type ConversationDetail = Omit<Conversation, "runs"> & {
 };
 export interface ReportConversation extends Conversation { queued: boolean }
 export interface ReportConversations { conversations: ReportConversation[]; requests: ChangeRequest[] }
+export type SiteConversations = ReportConversations;
 
 // Change requests filed by agents (built-in or MCP)
 
@@ -401,7 +403,20 @@ export interface NginxSite {
   /** A managed file that was edited by hand. */
   drifted?: boolean;
   cert?: CertInfo;
+  /** Primary upstream URL, document root, or fastcgi target extracted from config/spec. */
+  target?: string | null;
 }
+export interface NginxDraftRequest {
+  mode: "site" | "file";
+  instruction: string;
+  site_name?: string;
+  spec?: SiteSpec;
+  path?: string;
+  content?: string;
+}
+export type NginxDraftResponse =
+  | { mode: "site"; spec: SiteSpec; summary: string; warning: string | null; conversation_id: string }
+  | { mode: "file"; content: string; summary: string; warning: string | null; conversation_id: string };
 export type SiteKind = "proxy" | "static";
 export type SslMode = "none" | "acme" | "upload" | "path";
 export interface SiteSpec {

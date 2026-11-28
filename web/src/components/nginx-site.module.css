@@ -1,5 +1,17 @@
-/* The site form drawer and the certificate dialog. */
-.drawer.drawer { --drawer-size: min(40rem, calc(100vw - var(--space-4))); }
+/* The site form drawer, in-site Agent assistant, file editor, and certificate dialog. */
+.drawer.drawer { --drawer-size: min(48rem, calc(100vw - var(--space-4))); }
+
+.drawerTopBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding-bottom: 14px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.drawerTopActions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
 .form { display: grid; gap: 24px; }
 .group { display: grid; gap: 14px; min-width: 0; }
@@ -17,3 +29,142 @@
 .facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 
 .siteActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+
+.siteNameButton {
+  display: grid;
+  gap: 4px;
+  min-height: 40px;
+  align-content: center;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .siteNameButton:hover code { color: var(--accent); }
+}
+
+.subMeta {
+  color: var(--text-secondary);
+  font-size: var(--text-xs, 12px);
+  font-variant-numeric: tabular-nums;
+}
+.targetCell {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monoField textarea {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: var(--text-sm);
+}
+.monoCode {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+/* AI drafting box (inside SiteForm or NginxFileEditor). */
+.draftBox {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in oklab, var(--accent) 28%, var(--border));
+  border-radius: calc(var(--radius-surface) - 8px);
+  background: color-mix(in oklab, var(--accent) 5%, var(--surface-muted));
+}
+.draftHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.draftTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--foreground);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.draftChips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill, 999px);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+@media (hover: hover) and (pointer: fine) {
+  .chip:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--foreground);
+    background: var(--accent-subtle);
+  }
+}
+.chip:disabled { opacity: 0.55; cursor: not-allowed; }
+.draftActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.draftOutcomeLinks { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: var(--text-sm); }
+
+/* Embedded file editor header inside SiteDrawer. */
+.stackBody { display: grid; gap: 14px; min-width: 0; }
+.editorHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.editorMeta { display: grid; gap: 2px; min-width: 0; }
+
+/* In-site Agent chat tab. */
+.chatWrap { display: grid; gap: 14px; min-width: 0; }
+.chatTopBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.chatQuick { display: flex; flex-wrap: wrap; gap: 6px; }
+.threadPicker { min-width: 190px; }
+.threadPicker label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.chatThread {
+  display: grid;
+  gap: 12px;
+  max-height: min(46vh, 520px);
+  min-height: 160px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+.chatComposer { display: grid; gap: 8px; }
+
+/* File grouping in /nginx/files. */
+.fileGroups { display: grid; gap: 14px; }
+.fileGroup { display: grid; gap: 4px; }
+.fileGroupLabel {
+  margin: 0;
+  padding: 2px 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}

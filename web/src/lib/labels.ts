@@ -60,7 +60,8 @@ export const stepKindLabel: Record<AgentStep["kind"], string> = {
 /** Run / conversation kinds: report kinds, chat, and scheduled task kinds. */
 export const taskKindLabel: Record<string, string> = {
   hourly: "小时巡检", daily: "每日简报", incident: "事件分析", audit: "深度审计", chat: "对话",
-  log_scan: "日志扫描", security_check: "安全体检", package_advice: "包更新建议", custom: "自定义任务",
+  log_scan: "日志扫描", security_check: "安全体检", package_advice: "包更新建议",
+  prompt_gen: "提示词生成", nginx_draft: "nginx 配置撰写", custom: "自定义任务",
 };
 
 export const confidenceLabel: Record<Confidence, string> = { high: "高置信度", medium: "中置信度", low: "低置信度" };

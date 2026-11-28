@@ -290,6 +290,14 @@ function ContextNote({ context }: { context: ConversationContext }) {
   }
   if ("alert_id" in context) return <p className={styles.textSecondary}>本对话围绕告警 #{context.alert_id}</p>;
   if ("run_id" in context) return <p className={styles.textSecondary}>本对话围绕运行 {context.run_id}</p>;
+  if ("nginx_site" in context) {
+    return (
+      <p className={styles.textSecondary}>
+        本对话围绕 nginx 站点 <Link to={`/nginx?site=${encodeURIComponent(context.nginx_site)}&tab=agent`}>{context.nginx_site}</Link>
+        {context.file ? <>（<code className={styles.code}>{context.file}</code>）</> : null}
+      </p>
+    );
+  }
   return <p className={styles.textSecondary}>本对话附带了一份上下文资料</p>;
 }
 
